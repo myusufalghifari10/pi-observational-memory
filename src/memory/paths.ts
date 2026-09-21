@@ -83,6 +83,13 @@ export type TopicFrontMatter = {
 	title?: string;
 	summary?: string;
 	updated?: string;
+	/**
+	 * Repo-relative paths (optionally `path#symbol`) this topic asserts exist in the project.
+	 * Checked model-free at compaction render (see memory/anergy.ts); a topic whose
+	 * assertions all still hold is unaffected — absence demotes it to a stub in the injected
+	 * map. Empty/absent = exempt. On-disk files are NEVER touched by this check.
+	 */
+	asserts?: string[];
 };
 
 export type Topic = TopicFrontMatter & {
@@ -116,6 +123,19 @@ export function parseFrontMatter(content: string): { front: TopicFrontMatter; bo
 		}
 		if (key === "id" || key === "title" || key === "summary" || key === "updated") {
 			front[key] = value;
+		} else if (key === "asserts") {
+			// Comma-separated single line: `asserts: src/a.ts, src/b.ts#handle, "docs/c.md"`.
+			const list = value
+				.split(",")
+				.map((entry) => entry.trim())
+				.map((entry) =>
+					(entry.startsWith('"') && entry.endsWith('"') && entry.length >= 2) ||
+					(entry.startsWith("'") && entry.endsWith("'") && entry.length >= 2)
+						? entry.slice(1, -1)
+						: entry,
+				)
+				.filter((entry) => entry.length > 0);
+			if (list.length > 0) front.asserts = list;
 		}
 	}
 	return { front, body: content.slice(match[0].length) };

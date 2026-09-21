@@ -9,6 +9,7 @@
  *     from disk at each compaction and handed to renderSummary().
  */
 import type { Topic } from "./paths.js";
+import type { AnergyReport } from "./anergy.js";
 
 function summaryOf(topic: Topic): string {
 	const s = (topic.summary ?? "").trim();
@@ -43,14 +44,23 @@ export function renderIndexFile(topics: Topic[]): string {
  * topics (renderSummary then omits the section entirely). Each line is `path · summary
  * (updated …)` plus a thin orientation header — enough for the master to know a file exists
  * and decide whether to read it.
+ *
+ * Anergy: topics whose `asserts:` failed against the live repo (and were not re-armed by a
+ * buffer observation) render as a one-line stub instead of their summary — the map flags
+ * memory-vs-repo drift without deleting or editing anything on disk.
  */
-export function renderMemoryMap(topics: Topic[]): string | undefined {
+export function renderMemoryMap(topics: Topic[], anergy?: AnergyReport): string | undefined {
 	if (topics.length === 0) return undefined;
 	const lines: string[] = [
 		"## Memory map",
 		"Durable long-term notes live in `.memory/`. Read a file when a topic below looks relevant; these summaries are intentionally terse.",
 	];
 	for (const topic of topics) {
+		const failed = anergy?.get(topic.filename);
+		if (failed && failed.length > 0) {
+			lines.push(`- \`${topic.path}\` — anergic: ${failed.join(", ")} no longer holds (topic may be stale)`);
+			continue;
+		}
 		const updated = topic.updated ? ` (updated ${topic.updated})` : "";
 		lines.push(`- \`${topic.path}\` — ${summaryOf(topic)}${updated}`);
 	}

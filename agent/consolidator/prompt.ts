@@ -37,8 +37,11 @@ id: <stable-slug>            # matches the filename without .md, e.g. "auth" for
 title: <short human title>
 summary: <one line, <= 140 chars; what this file covers — this is what the assistant sees in the index>
 updated: <the current date/time provided in your prompt>
+asserts: <comma-separated repo-relative paths this topic asserts exist, optionally path#symbol, e.g. "src/search/reranker.ts#rerankerCacheKey, docs/setup.md"; use an empty value if the topic asserts nothing concrete>
 ---
 Maintain these fields whenever you write a file. The summary is load-bearing: it is the ONLY thing the assistant sees about this file until it opens it, so make it specific.
+
+The asserts field is checked against the live project at render time — a topic whose assertions no longer hold is flagged stale in the memory map. So keep it accurate and minimal: list only real, load-bearing artifacts you have seen referenced in the observations (a file the topic is about, a symbol that anchors it). Never list build outputs, generated files, or guesses.
 
 Filenames: lowercase kebab-case slugs ending in .md (e.g. auth.md, deploy-pipeline.md, user-preferences.md). The id must equal the filename without .md.
 
