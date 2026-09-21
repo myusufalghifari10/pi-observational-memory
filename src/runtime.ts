@@ -52,6 +52,9 @@ export class Runtime {
 	compactInFlight = false;
 	compactHookInFlight = false;
 
+	/** Re-entrancy flag for the worker-completion pump (see observer-trigger.ts). */
+	pumpQueued = false;
+
 	/** Last worker error message, surfaced by /om:status. */
 	lastWorkerError: string | undefined;
 
@@ -160,7 +163,17 @@ export class Runtime {
 		}
 	}
 
+	/** True when any worker subprocess (observer or consolidator) is in flight. */
+	get workerBusy(): boolean {
+		return this.consolidatorInFlight || this.observersInFlight.size > 0;
+	}
+
 	get observerSlotsAvailable(): number {
+		// Serial mode: at most ONE worker in flight across both roles — observers queue behind
+		// the running worker (and behind consolidator priority; see observer-trigger.ts).
+		if (this.config.serialWorkers) {
+			return this.workerBusy ? 0 : Math.min(1, this.config.observerConcurrency);
+		}
 		return Math.max(0, this.config.observerConcurrency - this.observersInFlight.size);
 	}
 }

@@ -32,7 +32,7 @@ import { renderIndexFile } from "../memory/index-render.js";
 import { atomicWrite, indexPath, listTopics, readJourney } from "../memory/paths.js";
 import type { Runtime } from "../runtime.js";
 import { buildWorkerArgv, buildWorkerEnv, spawnWorker } from "../spawn/launch.js";
-import { recordWorkerCost } from "./observer-trigger.js";
+import { recordWorkerCost, pumpWorkerQueue } from "./observer-trigger.js";
 
 type TriggerCtx = {
 	hasUI: boolean;
@@ -81,6 +81,8 @@ function buildConsolidatorPrompt(memoryRoot: string, promote: Observation[], jou
 export function evaluateConsolidatorTrigger(pi: ExtensionAPI, runtime: Runtime, ctx: TriggerCtx): void {
 	if (!runtime.enabled || runtime.config.passive) return;
 	if (runtime.consolidatorInFlight) return;
+	// Serial mode: the single worker slot must be free of observers before consolidating.
+	if (runtime.config.serialWorkers && runtime.observersInFlight.size > 0) return;
 
 	const branch = ctx.sessionManager.getBranch();
 	const active = foldLedger(branch).activeObservations;
@@ -154,6 +156,7 @@ async function dispatchConsolidator(
 	} finally {
 		runtime.consolidatorController = undefined;
 		runtime.consolidatorInFlight = false;
+		pumpWorkerQueue(pi, runtime, ctx);
 	}
 }
 

@@ -25,8 +25,11 @@ Date: 2026-09-21 · Status: APPROVED (pending final go) · Scope: 3 features, ~1
    only for resolving references; do NOT re-observe". Omitted when the buffer is empty.
 
 Out of scope (decided): `-p @file` prompt transport (NUL argv-strip stays), defaultOn,
-adaptive compaction threshold, pool-growth alarm, recall tool in OM (retrieval lives in
-pi-second-brain: topic files + JOURNEY.md sync at consolidation time — future work).
+adaptive compaction threshold, pool-growth alarm, recall tool in OM. Retrieval lives in
+pi-second-brain and needs **zero OM code**: the KB watcher auto-reindexes on file change
+(pi-second-brain guide, "Watcher auto-reindexes on file change"), so indexing
+`<project>/.memory` once with `knowledge_add` keeps topic files + JOURNEY.md continuously
+retrievable; consolidations therefore sync to the KB for free.
 
 ## Context (codebase facts this design relies on)
 
@@ -100,6 +103,9 @@ pi-second-brain: topic files + JOURNEY.md sync at consolidation time — future 
   failed assertion, exempt-when-empty, recompute per render (never persisted), IO-error
   treated as pass.
 - **B:** render cost = ≤20 cheap fs checks per topic, compaction-only. Acceptable.
+- **B (KB invariant):** anergy affects ONLY the injected compaction map. Topic files on
+  disk are never touched, so the pi-second-brain watcher/KB content is unaffected — a
+  stale file stays retrievable from the KB; only the in-context map flags it.
 - **C:** prompt bloat → capped at 5 single-line observations; omitted when empty.
 - **C:** observer re-observes bridge → mitigated by fence labels + system prompt rule +
   duplicate tolerance downstream (first-valid-wins fold).

@@ -30,6 +30,13 @@ export interface Config {
 	journeyTargetTokens: number;
 	/** Max simultaneous in-flight observer subprocesses. */
 	observerConcurrency: number;
+	/**
+	 * Queue workers one at a time: never more than ONE worker subprocess (observer OR
+	 * consolidator) in flight. For local-model backends where parallel subprocesses thrash.
+	 * The queue is event-driven; when the pool is due for consolidation the consolidator gets
+	 * the slot before new observers. Default false (parallel observers, background consolidator).
+	 */
+	serialWorkers: boolean;
 	models: {
 		observer: ConfiguredModel;
 		consolidator: ConfiguredModel;
@@ -55,6 +62,7 @@ export const DEFAULTS: Config = {
 	tailTokens: 20_000,
 	journeyTargetTokens: 1_000,
 	observerConcurrency: 4,
+	serialWorkers: false,
 	resumeAfterMidRunCompaction: true,
 	models: {
 		observer: { provider: "openrouter", id: "z-ai/glm-5.3", thinking: "low" },
@@ -95,7 +103,7 @@ function normalizeModel(value: unknown, fallback: ConfiguredModel): ConfiguredMo
 	return model;
 }
 
-function normalizeSettingsConfig(value: Record<string, unknown>, base: Config): Partial<Config> {
+export function normalizeSettingsConfig(value: Record<string, unknown>, base: Config): Partial<Config> {
 	const normalized: Partial<Config> = {};
 	const numberKeys = [
 		"chunkTokens",
@@ -115,6 +123,7 @@ function normalizeSettingsConfig(value: Record<string, unknown>, base: Config): 
 	if (value.chunkOverlapTokens === 0) normalized.chunkOverlapTokens = 0;
 	if (typeof value.resumeAfterMidRunCompaction === "boolean")
 		normalized.resumeAfterMidRunCompaction = value.resumeAfterMidRunCompaction;
+	if (typeof value.serialWorkers === "boolean") normalized.serialWorkers = value.serialWorkers;
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
 	if (isRecord(value.models)) {

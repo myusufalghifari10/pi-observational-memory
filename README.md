@@ -110,6 +110,7 @@ Namespace `observational-memory` in `~/.pi/agent/settings.json` (global) or
     "tailTokens": 20000,                 // verbatim tail; snaps to a chunk boundary
     "journeyTargetTokens": 1000,         // pushed JOURNEY.md size; compress oldest segments past this
     "observerConcurrency": 4,
+    "serialWorkers": false,              // true = queue workers one at a time (local models)
     "models": {
       "observer":     { "provider": "anthropic", "id": "claude-sonnet-4-6", "thinking": "low" },
       "consolidator": { "provider": "anthropic", "id": "claude-sonnet-4-6", "thinking": "medium" }
@@ -122,6 +123,11 @@ Namespace `observational-memory` in `~/.pi/agent/settings.json` (global) or
 
 `PI_OM_PASSIVE=1` forces `passive` (disables all triggers) for clean `/tree` testing.
 `passive` is a power-user setting distinct from the on/off gate.
+
+**Local models:** set `"serialWorkers": true` to run at most ONE worker subprocess at any
+moment — observers never run in parallel and never overlap the consolidator; the queue
+drains itself as workers finish, and when the observation pool is due for consolidation the
+consolidator gets the slot before new observers.
 
 ## Development
 

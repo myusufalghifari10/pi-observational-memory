@@ -5,6 +5,7 @@ import {
 	foldLedger,
 	latestCoverageMarkerId,
 	nowTimestamp,
+	poolTokens,
 	rawTokensAfterIndex,
 	selectSourceSlice,
 	serializeSourceAddressedBranchEntries,
@@ -16,6 +17,7 @@ import {
 import type { Runtime } from "../runtime.js";
 import { buildWorkerArgv, buildWorkerEnv, spawnWorker } from "../spawn/launch.js";
 import { readObserverResult, readWorkerCost, runCostPath, runResultPath } from "../spawn/runs.js";
+import { evaluateConsolidatorTrigger } from "./consolidator-trigger.js";
 
 type TriggerCtx = {
 	hasUI: boolean;
@@ -65,6 +67,34 @@ function effectiveWatermarkId(runtime: Runtime, branch: Entry[]): string | undef
 }
 
 /**
+ * Consolidator-priority rule for serial mode: when the active pool is at/over the
+ * consolidation threshold, observers yield the single worker slot so the consolidator drains
+ * the buffer before more observers add to it. (A running consolidator closes the slot via
+ * `observerSlotsAvailable`; this predicate only covers the free-slot case.)
+ */
+export function shouldYieldToConsolidator(poolTokensValue: number, consolidateAtPoolTokens: number): boolean {
+	return poolTokensValue >= consolidateAtPoolTokens;
+}
+
+/**
+ * Re-run both worker triggers once, after the current stack unwinds. Called from worker
+ * completion paths so a serial queue (or any backlog beyond observerConcurrency) self-drains
+ * without waiting for the next turn_end/agent_start. Event-driven: a microtask pump, never a
+ * timer. The consolidator handler lives in consolidator-trigger.ts, which already imports
+ * this module — the function-decl-only cycle is safe under ESM live bindings.
+ */
+export function pumpWorkerQueue(pi: ExtensionAPI, runtime: Runtime, ctx: TriggerCtx): void {
+	if (runtime.pumpQueued) return;
+	runtime.pumpQueued = true;
+	queueMicrotask(() => {
+		runtime.pumpQueued = false;
+		if (!runtime.enabled || runtime.config.passive) return;
+		evaluateObserverTriggers(pi, runtime, ctx);
+		evaluateConsolidatorTrigger(pi, runtime, ctx);
+	});
+}
+
+/**
  * Evaluate the raw-token observer clock and fire as many parallel observers as there is
  * backlog and concurrency for. Pure dispatch: each observer is awaited inside its own async
  * task tracked in `runtime.observersInFlight`, never blocking the event handler.
@@ -75,6 +105,14 @@ export function evaluateObserverTriggers(pi: ExtensionAPI, runtime: Runtime, ctx
 	const hasUI = ctx.hasUI;
 	const ui = ctx.ui;
 	const sessionManager = ctx.sessionManager;
+
+	// Serial mode, consolidator priority: when the pool is due for consolidation, observers
+	// yield the single slot so the consolidator handler (registered next in the same event)
+	// can take it and drain the buffer first.
+	if (runtime.config.serialWorkers && !runtime.consolidatorInFlight) {
+		const pool = poolTokens(foldLedger(sessionManager.getBranch()).activeObservations);
+		if (shouldYieldToConsolidator(pool, runtime.config.consolidateAtPoolTokens)) return;
+	}
 
 	// Collect one start-toast line per dispatched chunk, then fire a single batched
 	// notify after the loop. Firing inside the loop would cause pi's showStatus() to
@@ -188,6 +226,7 @@ async function dispatchObserver(
 		if (ctx.hasUI) ctx.ui?.notify(`om: observer failed: ${message}`, "error");
 	} finally {
 		runtime.observersInFlight.delete(runId);
+		pumpWorkerQueue(pi, runtime, ctx);
 	}
 }
 
