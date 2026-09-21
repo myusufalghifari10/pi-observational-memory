@@ -25,6 +25,11 @@ describe("launch argv + env", () => {
 		expect(AGENT_EXTENSION_PATH.endsWith("/agent/index.ts")).toBe(true);
 	});
 
+	it("strips NUL bytes from the kickoff prompt (spawn rejects argv containing them)", () => {
+		const argv = buildWorkerArgv({ model, sessionName: "n", kickoffPrompt: "a\u0000b\u0000c" });
+		expect(argv[argv.indexOf("-p") + 1]).toBe("abc");
+	});
+
 	it("omits --thinking when no level is configured", () => {
 		const argv = buildWorkerArgv({ model: { provider: "x", id: "y" }, sessionName: "n", kickoffPrompt: "p" });
 		expect(argv).not.toContain("--thinking");

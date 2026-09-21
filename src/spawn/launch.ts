@@ -57,7 +57,11 @@ export function buildWorkerArgv(opts: {
 	if (opts.model.thinking) args.push("--thinking", opts.model.thinking);
 	args.push("-e", opts.agentExtensionPath ?? AGENT_EXTENSION_PATH);
 	args.push("-n", opts.sessionName);
-	args.push("-p", opts.kickoffPrompt);
+	// Node's spawn() rejects any argv containing NUL (execve cannot carry one). The kickoff
+	// prompt embeds raw conversation content verbatim, and that content is untrusted input —
+	// PDF-extracted tool output (e.g. knowledge_search snippets) has been observed carrying
+	// real "\0" chars. Strip them at this single point every worker argv is built through.
+	args.push("-p", opts.kickoffPrompt.replace(/\0/g, ""));
 	return [pi.command, ...args];
 }
 
