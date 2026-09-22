@@ -92,8 +92,16 @@ export function pumpWorkerQueue(pi: ExtensionAPI, runtime: Runtime, ctx: Trigger
 	queueMicrotask(() => {
 		runtime.pumpQueued = false;
 		if (!runtime.enabled || runtime.config.passive) return;
-		evaluateObserverTriggers(pi, runtime, ctx);
-		evaluateConsolidatorTrigger(pi, runtime, ctx);
+		// The captured ctx can go stale across this async gap (session replacement or reload
+		// in between), and pi's ctx accessors throw on a stale ctx. A pump is opportunistic —
+		// never let it kill the process; the next turn_end/agent_start re-evaluates anyway.
+		try {
+			evaluateObserverTriggers(pi, runtime, ctx);
+			evaluateConsolidatorTrigger(pi, runtime, ctx);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			runtime.lastWorkerError = `worker pump skipped (stale session context): ${message}`;
+		}
 	});
 }
 
