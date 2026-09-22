@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { logIfEnabled } from "../debug-log.js";
 import { renderMemoryMap } from "../memory/index-render.js";
 import { checkAnergy } from "../memory/anergy.js";
 import { listTopics, readJourney } from "../memory/paths.js";
@@ -148,6 +149,12 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			}
 
 			const snapped = snap.firstKeptId;
+			logIfEnabled(runtime.config.debugLog, "compaction.snap", {
+				firstKeptId: snapped,
+				tail: snap.tail,
+				observerWait: runtime.lastCompactionObserverWait,
+				tokensBefore,
+			});
 			const projection = buildCompactionProjection(branch, snapped);
 			// Phase B: render the long-term tier live from disk, regenerated each compaction
 			// (throwaway projections — cannot decay). The journey is the running descriptive history

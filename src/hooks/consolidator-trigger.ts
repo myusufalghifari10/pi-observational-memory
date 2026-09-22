@@ -16,6 +16,7 @@
  * recording (the standing safety net for lossy rewrites) and is the critic tier's job to catch.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { logIfEnabled } from "../debug-log.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
 	foldLedger,
@@ -143,6 +144,7 @@ async function dispatchConsolidator(
 		// Re-render INDEX.md so live ls/grep truth leads the pushed map (design risk 3).
 		atomicWrite(indexPath(runtime.memoryRoot), renderIndexFile(listTopics(runtime.memoryRoot)));
 
+		logIfEnabled(runtime.config.debugLog, "consolidator.settle", { outcome: "ok", exitCode: exit.code, dropped: toDrop.length, handed: promote.length }, runId);
 		runtime.status.workerDone(runId, toDrop.length);
 		runtime.refreshFooterGauges(ctx.sessionManager.getBranch(), ctx.getContextUsage?.()?.tokens ?? null);
 		if (ctx.hasUI && ctx.ui) {
@@ -151,6 +153,7 @@ async function dispatchConsolidator(
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		runtime.lastWorkerError = message;
+		logIfEnabled(runtime.config.debugLog, "consolidator.settle", { outcome: "error", error: message }, runId);
 		runtime.status.workerError(runId);
 		if (ctx.hasUI) ctx.ui?.notify(`om: consolidator failed: ${message}`, "error");
 	} finally {

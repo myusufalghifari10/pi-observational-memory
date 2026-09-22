@@ -70,3 +70,13 @@ function rotateIfNeeded(path: string): void {
 	if (existsSync(backupPath)) unlinkSync(backupPath);
 	renameSync(path, backupPath);
 }
+
+/**
+ * Emit `event` only when the caller's `debugLog` config flag is true. Establishes the
+ * AsyncLocalStorage context inline (enabled + optional runId) so the NDJSON payload carries
+ * the standard envelope fields; a pure no-op while debugLog is off.
+ */
+export function logIfEnabled(enabled: boolean, event: string, data: Record<string, unknown> = {}, runId?: string): void {
+	if (enabled !== true) return;
+	withDebugLogContext({ enabled, runId }, () => debugLog(event, data));
+}

@@ -48,6 +48,20 @@ export class Runtime {
 	 */
 	dispatchedCoversUpToId: string | undefined;
 
+	/**
+	 * Observer slices whose dispatch FAILED and must be re-observed before the watermark moves
+	 * past them (retry-once policy: an entry is dropped after its second failure). Oldest first.
+	 * In-memory only, like dispatchedCoversUpToId.
+	 */
+	failedSlices: Array<{ afterEntryId: string | undefined; coversUpToId: string; attempts: number }> = [];
+
+	/**
+	 * Persistent per-range attempt counter backing the retry cap. Needed because takeRetrySlice
+	 * CONSUMES the queue entry on dispatch — without a separate count, record→take→record would
+	 * restart at 1 and a permanently-broken chunk would retry forever.
+	 */
+	sliceAttemptCounts: Map<string, number> = new Map();
+
 	/** Guards so compaction trigger + hook never re-enter. */
 	compactInFlight = false;
 	compactHookInFlight = false;

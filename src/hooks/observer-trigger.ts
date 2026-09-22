@@ -1,6 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { logIfEnabled } from "../debug-log.js";
 import { assignObservationTimestamps } from "../ids.js";
 import {
+	entryIndexById,
 	entryIndexForId,
 	foldLedger,
 	latestCoverageMarkerId,
@@ -80,6 +82,58 @@ export function shouldYieldToConsolidator(poolTokensValue: number, consolidateAt
 }
 
 /**
+ * Failure-retry bookkeeping for dispatched observer slices: a failed chunk must be re-observed
+ * on a later evaluation instead of being silently skipped by the advancing dispatch watermark.
+ * Upserts by coversUpToId; once an entry's attempts reaches 2 the slice is dropped (we give up
+ * after 2 total tries: the original dispatch + one retry).
+ */
+export function recordSliceFailure(runtime: Runtime, afterEntryId: string | undefined, coversUpToId: string): void {
+	// Count from the PERSISTENT map, not the queue: takeRetrySlice consumes the entry on dispatch,
+	// so counting queue lookups would reset to 1 after every take and loop forever on a broken chunk.
+	const attempts = (runtime.sliceAttemptCounts.get(coversUpToId) ?? 0) + 1;
+	runtime.sliceAttemptCounts.set(coversUpToId, attempts);
+	if (attempts >= 2) {
+		// Give up after 2 total tries (original dispatch + one retry): drop any queued entry
+		// and do NOT re-queue — the range is never dispatched again.
+		const queued = runtime.failedSlices.findIndex((entry) => entry.coversUpToId === coversUpToId);
+		if (queued >= 0) runtime.failedSlices.splice(queued, 1);
+		return;
+	}
+	const existing = runtime.failedSlices.find((entry) => entry.coversUpToId === coversUpToId);
+	if (existing) existing.attempts = attempts;
+	else runtime.failedSlices.push({ afterEntryId, coversUpToId, attempts });
+}
+
+/** Forget a failed slice (its retry committed, or the range vanished from the branch). */
+export function clearSliceFailure(runtime: Runtime, coversUpToId: string): void {
+	const index = runtime.failedSlices.findIndex((entry) => entry.coversUpToId === coversUpToId);
+	if (index >= 0) runtime.failedSlices.splice(index, 1);
+	runtime.sliceAttemptCounts.delete(coversUpToId);
+}
+
+/**
+ * Oldest failed slice first: recompute the same range via selectSourceSlice so the retry sees
+ * the current branch content. The entry is CONSUMED on take (so the dispatch loop below cannot
+ * re-dispatch the same range while it is in flight); a failing retry re-records it via
+ * recordSliceFailure, which enforces the give-up cap. undefined when nothing awaits a retry.
+ */
+export function takeRetrySlice(
+	branch: Entry[],
+	runtime: Runtime,
+	chunkTokens: number,
+): { slice: SourceSlice; afterEntryId: string | undefined } | undefined {
+	const entry = runtime.failedSlices[0];
+	if (!entry) return undefined;
+	runtime.failedSlices.shift();
+	// Recompute the SAME range: bound the branch at the recorded coversUpToId so a retry can
+	// never swallow later chunks (selectSourceSlice on the full branch would run to its budget).
+	// If the end id no longer resolves (branch switched underneath), fall back to the full branch.
+	const endIdx = entryIndexById(branch).get(entry.coversUpToId);
+	const bounded = endIdx === undefined ? branch : branch.slice(0, endIdx + 1);
+	return { slice: selectSourceSlice(bounded, entry.afterEntryId, chunkTokens), afterEntryId: entry.afterEntryId };
+}
+
+/**
  * Re-run both worker triggers once, after the current stack unwinds. Called from worker
  * completion paths so a serial queue (or any backlog beyond observerConcurrency) self-drains
  * without waiting for the next turn_end/agent_start. Event-driven: a microtask pump, never a
@@ -132,6 +186,31 @@ export function evaluateObserverTriggers(pi: ExtensionAPI, runtime: Runtime, ctx
 
 	while (runtime.observerSlotsAvailable > 0) {
 		const branch = sessionManager.getBranch();
+
+		// Failed chunks retry FIRST (retry-once), so a crashed worker's range is observed again
+		// instead of being skipped by the advancing dispatch watermark.
+		const retry = takeRetrySlice(branch, runtime, runtime.config.chunkTokens);
+		if (retry) {
+			if (retry.slice.entries.length > 0 && retry.slice.coversUpToId) {
+				runtime.dispatchedCoversUpToId = retry.slice.coversUpToId;
+				runtime.trackObserverTask(
+					dispatchObserver(
+						pi,
+						runtime,
+						{ hasUI, ui, sessionManager, getContextUsage: ctx.getContextUsage },
+						retry.slice,
+						retry.afterEntryId,
+					),
+				);
+				if (hasUI) startToastLines.push(`om: observer started (~${retry.slice.tokens.toLocaleString()} tok) [retry]`);
+				continue;
+			}
+			// The failed range no longer resolves against this branch — takeRetrySlice already
+			// consumed the entry, so just move on (next iteration tries the next failed slice,
+			// or falls through to the fresh-slice path when none remain).
+			continue;
+		}
+
 		const watermarkId = effectiveWatermarkId(runtime, branch);
 		const watermarkIndex = entryIndexForId(branch, watermarkId);
 		const remaining = rawTokensAfterIndex(branch, watermarkIndex);
@@ -144,7 +223,7 @@ export function evaluateObserverTriggers(pi: ExtensionAPI, runtime: Runtime, ctx
 
 		runtime.dispatchedCoversUpToId = slice.coversUpToId;
 		runtime.trackObserverTask(
-			dispatchObserver(pi, runtime, { hasUI, ui, sessionManager, getContextUsage: ctx.getContextUsage }, slice),
+			dispatchObserver(pi, runtime, { hasUI, ui, sessionManager, getContextUsage: ctx.getContextUsage }, slice, watermarkId),
 		);
 		if (hasUI) startToastLines.push(`om: observer started (~${slice.tokens.toLocaleString()} tok)`);
 	}
@@ -201,6 +280,7 @@ async function dispatchObserver(
 	runtime: Runtime,
 	ctx: TriggerCtx,
 	slice: SourceSlice,
+	afterEntryId: string | undefined,
 ): Promise<void> {
 	const runId = nextRunId();
 	const controller = new AbortController();
@@ -213,6 +293,7 @@ async function dispatchObserver(
 	// Start toast is fired as a batch by evaluateObserverTriggers after the dispatch
 	// loop, not here, so simultaneous starts coalesce into one multi-line notify.
 	runtime.status.workerStart("observer", runId);
+	logIfEnabled(runtime.config.debugLog, "observer.dispatch", { tokens: slice.tokens, afterEntryId }, runId);
 
 	try {
 		// The chunk IS the recorded user prompt (passed via `pi -p`), not an ephemeral
@@ -250,6 +331,8 @@ async function dispatchObserver(
 			pi.appendEntry(OM_OBSERVATIONS_RECORDED, { observations, coversUpToId });
 		}
 		runtime.status.workerDone(runId, observations.length);
+		clearSliceFailure(runtime, coversUpToId);
+		logIfEnabled(runtime.config.debugLog, "observer.settle", { outcome: "ok", exitCode: exit.code, observations: observations.length }, runId);
 		runtime.refreshFooterGauges(ctx.sessionManager.getBranch(), ctx.getContextUsage?.()?.tokens ?? null);
 		if (ctx.hasUI && ctx.ui) {
 			// Route through the coalescer: if another observer finishes in the same
@@ -263,6 +346,8 @@ async function dispatchObserver(
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		runtime.lastWorkerError = message;
+		recordSliceFailure(runtime, afterEntryId, coversUpToId);
+		logIfEnabled(runtime.config.debugLog, "observer.settle", { outcome: "error", error: message }, runId);
 		runtime.status.workerError(runId);
 		// Errors bypass the coalescer: they use a different display level and
 		// should never be merged with info lines.

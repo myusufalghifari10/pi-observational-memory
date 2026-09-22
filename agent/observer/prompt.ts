@@ -70,11 +70,3 @@ Detail preservation. Preserve distinguishing details so future queries can still
 Timestamp format: "YYYY-MM-DD HH:MM" (local time, 24-hour, to the minute). This goes in the timestamp field, not the content.
 
 Remember: these observations are the assistant's ONLY memory of this chunk once the raw messages fall out of context. Make them count.`;
-
-/**
- * Kickoff message passed as the `pi -p` positional arg. It only *triggers* the run; the
- * chunk itself is injected as a user message by the agent's `context` hook (see agent/index.ts),
- * never via the system prompt or shell args.
- */
-export const OBSERVER_KICKOFF =
-	"A conversation chunk has been placed in your context. Compress it into observations by calling record_observations one or more times, then reply with a one-sentence confirmation when the chunk is fully covered.";

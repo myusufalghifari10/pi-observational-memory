@@ -144,10 +144,7 @@ function registerModelCommand(pi: ExtensionAPI, runtime: Runtime): void {
 	pi.registerCommand("om-change-model", {
 		description: "Change observer/consolidator model: role → provider → model → thinking (persisted + applied now)",
 		handler: async (_args: string, ctx: any) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("om-change-model requires an interactive session", "error");
-				return;
-			}
+			if (!ctx.hasUI) return;
 			let settings: Settings;
 			try {
 				settings = readSettings(DEFAULT_SETTINGS_PATH);

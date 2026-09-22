@@ -1,7 +1,7 @@
 /**
  * Shared worker agent extension (L4), loaded into a subprocess `pi` via `-e`. Branches on
- * the OM_WORKER env var. Phase A implements the `observer` role only; `consolidator` arrives
- * in Phase B.
+ * the OM_WORKER env var. It implements both roles: `observer` (Phase A) and `consolidator`
+ * (Phase B).
  *
  * The worker is headless (`pi -p`): builtin tools are disabled (`--no-builtin-tools`), the
  * system prompt is fully replaced with the role prompt, and the role registers only the tools

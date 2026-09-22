@@ -144,12 +144,34 @@ export function readEnvConfig(env: NodeJS.ProcessEnv = process.env): Partial<Con
 	return {};
 }
 
-function readNamespacedConfig(path: string, base: Config): Partial<Config> {
+/**
+ * Merge the two settings files layer-by-layer: the global file is normalized against DEFAULTS
+ * first, then the project file is normalized against THAT result — so a field the project file
+ * does not mention falls back to the global file's value (and to DEFAULTS only when the global
+ * file also does not mention it). Fixes the old bug where a project file setting only
+ * `models.observer.thinking` silently reset provider/id to DEFAULTS instead of the global file's.
+ */
+export function mergeSettingsConfig(globalRaw: unknown, projectRaw: unknown): Partial<Config> {
+	const globalNormalized = normalizeSettingsConfig(isRecord(globalRaw) ? globalRaw : {}, DEFAULTS);
+	const globalBase: Config = {
+		...DEFAULTS,
+		...globalNormalized,
+		models: { ...DEFAULTS.models, ...(globalNormalized.models ?? {}) },
+	};
+	const projectNormalized = normalizeSettingsConfig(isRecord(projectRaw) ? projectRaw : {}, globalBase);
+	return {
+		...globalBase,
+		...projectNormalized,
+		models: { ...globalBase.models, ...(projectNormalized.models ?? {}) },
+	};
+}
+
+function readNamespacedRaw(path: string): Record<string, unknown> {
 	if (!existsSync(path)) return {};
 	try {
 		const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
 		const nested = raw[SETTINGS_KEY];
-		return isRecord(nested) ? normalizeSettingsConfig(nested, base) : {};
+		return isRecord(nested) ? nested : {};
 	} catch {
 		return {};
 	}
@@ -158,18 +180,12 @@ function readNamespacedConfig(path: string, base: Config): Partial<Config> {
 export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): Config {
 	const globalPath = join(getAgentDir(), "settings.json");
 	const projectPath = join(cwd, ".pi", "settings.json");
-	const globalConfig = readNamespacedConfig(globalPath, DEFAULTS);
-	const projectConfig = readNamespacedConfig(projectPath, DEFAULTS);
+	const merged = mergeSettingsConfig(readNamespacedRaw(globalPath), readNamespacedRaw(projectPath));
 	const envConfig = readEnvConfig(env);
 	return {
 		...DEFAULTS,
-		...globalConfig,
-		...projectConfig,
+		...merged,
 		...envConfig,
-		models: {
-			...DEFAULTS.models,
-			...globalConfig.models,
-			...projectConfig.models,
-		},
+		models: { ...DEFAULTS.models, ...(merged.models ?? {}) },
 	};
 }
