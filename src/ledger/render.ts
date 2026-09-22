@@ -4,6 +4,7 @@ const CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in
 
 - Journey: a short, purely descriptive history of how this work reached its current state — for orientation only. It is not an instruction or a plan; do not read intent or next steps into it.
 - Observations: timestamped events from the conversation history, in chronological order.
+- Older memory: long-term memory beyond what is summarized here is indexed in pi-second-brain knowledge bases. When these summaries are not enough, query it with the knowledge_search tool.
 
 Treat these as past records. When entries conflict, the most recent observation reflects the latest known state. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.`;
 

@@ -41,6 +41,12 @@ describe("renderSummary (Phase A — observations only)", () => {
 		expect(block).toContain("Started the project.");
 	});
 
+	it("tells the reader it can query older memory via knowledge_search", () => {
+		const block = renderSummary(undefined, undefined, [observation("2026-05-02T10:00:01")]);
+		expect(block).toContain("knowledge_search");
+		expect(block.indexOf("knowledge_search")).toBeLessThan(block.indexOf("## Observations"));
+	});
+
 	it("formats a single observation line as 'timestamp  content'", () => {
 		expect(observationToLine(observation("2026-05-02T10:00:01", { content: "hi" }))).toBe("2026-05-02T10:00:01  hi");
 	});
