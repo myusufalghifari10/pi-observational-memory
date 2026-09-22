@@ -27,7 +27,12 @@ function fail(text: string): ToolText {
 
 /** Resolve a requested path against the sandbox root, or return undefined if it escapes. */
 function scoped(root: string, requested: string): string | undefined {
-	const abs = resolve(root, requested);
+	// The sandbox root IS the .memory dir, but the model may naturally pass a
+	// project-relative ".memory/x.md" path. Strip that prefix so the file lands at the root:
+	// a nested root/.memory/x.md would be invisible to listTopics/readJourney (observed
+	// incident — 9 archived files hidden from the memory map).
+	const normalized = requested.replace(/^(?:\.\/)?\.memory(?:\/+|$)/, "");
+	const abs = resolve(root, normalized === "" ? "." : normalized);
 	const rel = relative(root, abs);
 	if (rel === "") return abs;
 	if (rel.startsWith("..")) return undefined;

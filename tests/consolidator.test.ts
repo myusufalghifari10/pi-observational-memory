@@ -55,6 +55,21 @@ describe("registerConsolidatorTools (scoped to .memory/)", () => {
 		expect(existsSync(join(cwd, "escape.md"))).toBe(false);
 	});
 
+	it("normalizes a .memory/-prefixed path to the sandbox root (no nested .memory/)", async () => {
+		const res = await tools.get("write").execute("1", { path: ".memory/auth.md", content: "prefixed write" });
+		expect(res.content[0].text).toContain("Wrote");
+		expect(readFileSync(join(memoryRoot, "auth.md"), "utf-8")).toContain("prefixed write");
+		expect(existsSync(join(memoryRoot, ".memory", "auth.md"))).toBe(false);
+		const read = await tools.get("read").execute("2", { path: "./.memory/auth.md" });
+		expect(read.content[0].text).toContain("prefixed write");
+	});
+
+	it("still blocks INDEX.md through a .memory/ prefix", async () => {
+		const w = await tools.get("write").execute("1", { path: ".memory/INDEX.md", content: "x" });
+		expect(w.content[0].text).toContain("generated automatically");
+		expect(existsSync(join(memoryRoot, ".memory"))).toBe(false);
+	});
+
 	it("edit replaces an exact unique substring and rejects ambiguous matches", async () => {
 		await tools.get("write").execute("1", { path: "t.md", content: "alpha beta alpha" });
 		const ambiguous = await tools.get("edit").execute("2", { path: "t.md", oldText: "alpha", newText: "X" });
