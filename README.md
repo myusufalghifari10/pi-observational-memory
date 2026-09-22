@@ -93,11 +93,19 @@ folds each run into an `om.cost` ledger entry.
 | `/om:status` | Workers in flight, active observation count, next-observer progress, pool/consolidator state, topic-file count, journey size, context usage, **session cost**, last error |
 | `/om:compact` | Force a compaction now (ignores the threshold) |
 | `/om:consolidate` | Force a consolidation now (ignores the pool threshold) |
+| `/om-parallel` | `serialWorkers=false` — observers run concurrently (cloud models). Saved to global settings **and** applied to the running session immediately |
+| `/om-sequential` | `serialWorkers=true` — one worker at a time, observers queue behind the running worker (local models). Saved + applied immediately |
+| `/om-change-model` | Interactive picker (role → provider → model → thinking) writing `observational-memory.models.{observer,consolidator}`; confirm step, then saved + applied immediately. Works even when `/om` is off |
 
 ## Configuration
 
 Namespace `observational-memory` in `~/.pi/agent/settings.json` (global) or
 `.pi/settings.json` (project; overrides global):
+
+> **Precedence:** `/om-parallel`, `/om-sequential` and `/om-change-model` write the **global**
+> `~/.pi/agent/settings.json` (atomic write, `<file>.bak` backup) and patch the running session
+> in memory. On the next config load a project-level `.pi/settings.json` value still overrides
+> the global file — keep project overrides in sync if you use them.
 
 ```jsonc
 {
