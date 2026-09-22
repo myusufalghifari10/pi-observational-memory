@@ -57,7 +57,7 @@ Observational memory takes the third path: **observe in the background, store du
 - **Honest accounting.** Worker spend is captured from pi's own usage totals, summed monotonically across branches, shown in the footer and `/om:status`.
 - **`/tree`-correct by construction.** Ledger folds are branch-local; durable files are session-scoped; cost never rolls back.
 - **Hardened subprocess transport.** Worker argv is stripped of NUL bytes (PDF tool output used to crash dispatch), the worker pump survives session reloads, and the consolidator's tools are path-sandboxed to `.memory/`.
-- **Second-brain retrieval.** Every compaction block tells the reader that older memory is indexed in pi-second-brain and can be queried with `knowledge_search` — retrieval lives in a real vector KB instead of a bespoke recall tool.
+- **Second-brain retrieval.** Every compaction block tells the reader that older memory is indexed in [pi-second-brain](https://github.com/myusufalghifari10/pi-second-brain) and can be queried with `knowledge_search` — retrieval lives in a real vector KB instead of a bespoke recall tool.
 - **Off by default.** Nothing runs until you type `/om on`. Workers disable themselves when their model/provider is unset, even if the gate is on.
 
 ## Commands
@@ -83,7 +83,7 @@ Observational memory takes the third path: **observe in the background, store du
 | Roles | observer, consolidator | Observer, Reflector, Dropper | observer, consolidator | same as amos | Actor, Observer, Reflector |
 | Workers | subprocess `pi` sessions, parallel **or** serial | in-process agents, always serial | subprocess, parallel (4) | subprocess, parallel (4) | in-process LLM calls |
 | Storage | ledger + `.memory/*.md` topic files | session ledger only | ledger + `.memory/*.md` | ledger + `.memory/*.md` | JSON state files (`.pi/om/`) |
-| Retrieval | filesystem grep + pi-second-brain `knowledge_search` | `recall` tool by 12-hex id | filesystem grep | filesystem grep | `om_recall` + optional vector search |
+| Retrieval | filesystem grep + [pi-second-brain](https://github.com/myusufalghifari10/pi-second-brain) `knowledge_search` | `recall` tool by 12-hex id | filesystem grep | filesystem grep | `om_recall` + optional vector search |
 | License | MIT | MIT | MIT | MIT | MIT |
 | Activity (Sep 2026) | active | active (v3.1.4 on 2026-09-20) | quiet since 2026-08-25 | 8 stacked branches, Aug–Sep | dormant since 2026-06-23 |
 
@@ -120,7 +120,7 @@ Observational memory takes the third path: **observe in the background, store du
 | **Retrieval** ||||||
 | Recall-by-id tool | ✗ | ✓ | ✗ | ✗ | ✓ |
 | Built-in vector/semantic search | ✗ | ✗ | ✗ | ✗ | ✓ (hash/BOW + Gemini) |
-| External semantic KB integration (pi-second-brain) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| External semantic KB integration ([pi-second-brain](https://github.com/myusufalghifari10/pi-second-brain)) | ✓ | ✗ | ✗ | ✗ | ✗ |
 | **Ops & UX** ||||||
 | Cost/spend tracking (per session, monotonic) | ✓ | ✗ | ✓ | ✓ | ✗ |
 | TUI footer gauges + worker widget | ✓ | ✗ | ✓ | ✓ | ✓ |
@@ -139,7 +139,7 @@ Observational memory takes the third path: **observe in the background, store du
 - **The concept** is [Mastra](https://mastra.ai)'s *Observational Memory* research; elpapi42's README credits it as the origin.
 - **First OM extension for pi** was [ohmyzhell's](https://github.com/GitHubFoxy/pi-extension-observational-memory) (Feb 2026, dormant). **elpapi42's** (Apr 2026) became *the* canonical one: ~650★, 25 npm releases up to 3.1.4, and a richer design — three in-process agents (Observer/Reflector/Dropper) and a recall-by-id tool, but everything lives inside the session file.
 - **amosblomqvist's** (Jun 2026) is *not* a git fork of elpapi42 — it's an independent, structurally different rewrite (subprocess workers, on-disk `.memory/` files) whose own code comments describe it as "trimmed from OM V3". 53★, quiet since Aug 2026.
-- **This repo** is a git fork of amosblomqvist's `78a1efc`, extended with: NUL-safe worker argv, serial mode for local models, observer context bridging, anergy, bounded failed-chunk retry, stale-ctx crash hardening, `.memory/` path normalization, wired debug logging, `/om-parallel` · `/om-sequential` · `/om-change-model`, pi-second-brain retrieval advertising, and this README.
+- **This repo** is a git fork of amosblomqvist's `78a1efc`, extended with: NUL-safe worker argv, serial mode for local models, observer context bridging, anergy, bounded failed-chunk retry, stale-ctx crash hardening, `.memory/` path normalization, wired debug logging, `/om-parallel` · `/om-sequential` · `/om-change-model`, [pi-second-brain](https://github.com/myusufalghifari10/pi-second-brain) retrieval advertising, and this README.
 - **casret** forks amosblomqvist as a laboratory: eight stacked feature branches, none merged.
 - **nik1t7n's** is an independent Mastra-style take (Jun 2026) — one 2,500-line file, LLM reflection levels 0–4, optional vector recall, and the ecosystem's only secret redaction and attachment gates.
 
@@ -205,10 +205,14 @@ Architecture notes: `src/ledger/*` (fold, projection, render) and `src/memory/*`
 
 Honest list, because the table above shows others doing some of this better:
 
-- **No built-in vector search or recall-by-id tool.** Retrieval is filesystem grep, optionally via pi-second-brain's `knowledge_search` (advertised at every compaction).
+- **No built-in vector search or recall-by-id tool.** Retrieval is filesystem grep, optionally via [pi-second-brain](https://github.com/myusufalghifari10/pi-second-brain)'s `knowledge_search` (advertised at every compaction).
 - **No secret redaction or attachment/image gates yet.** Observations persist verbatim — nik1t7n's extension is currently the only one in this table that redacts. Treat what you paste into observed sessions accordingly.
 - **Memory is per-session** (fork-seeded, not project-shared). Two sessions in the same project keep separate `.memory/` trees.
 - **`.runs/` IPC files are never garbage-collected** (v1 trade-off; plain JSON, one pair per worker run).
+
+## Related project
+
+> **[pi-second-brain](https://github.com/myusufalghifari10/pi-second-brain)** — a portable, harness-agnostic second brain: an embeddable index plus hybrid (BM25 + vector + rerank) search that runs standalone on any machine. This extension feeds it: consolidated `.memory/` topic files get indexed as a knowledge base and become queryable with `knowledge_search` at any time. **Observational memory writes; pi-second-brain retrieves.** Two halves of one memory stack — this repo is the pi-native writer, that one is the portable retrieval engine.
 
 ## License
 
