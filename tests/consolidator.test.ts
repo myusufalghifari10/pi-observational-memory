@@ -4,7 +4,38 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { registerConsolidatorTools } from "../agent/consolidator/tools.js";
+import { CONSOLIDATOR_SYSTEM } from "../agent/consolidator/prompt.js";
 import { buildWorkerEnv } from "../src/spawn/launch.js";
+
+describe("P1.4 consolidator duties (prompt)", () => {
+	it("declares all seven STATE.md section headings, in plan order", () => {
+		const headings = [
+			"## Goal",
+			"## Constraints",
+			"## Plan",
+			"## Done",
+			"## Blocked",
+			"## Next",
+			"## Open loops",
+		];
+		let last = -1;
+		for (const heading of headings) {
+			const idx = CONSOLIDATOR_SYSTEM.indexOf(heading);
+			expect(idx, `missing STATE heading: ${heading}`).toBeGreaterThan(-1);
+			expect(idx, `STATE heading out of order: ${heading}`).toBeGreaterThan(last);
+			last = idx;
+		}
+	});
+
+	it("carries the DEATHS.md line convention and the rejected:-routing rule", () => {
+		expect(CONSOLIDATOR_SYSTEM).toContain(
+			"- rejected: <approach> because <reason> (verify: <path[#symbol]>)",
+		);
+		expect(CONSOLIDATOR_SYSTEM).toContain('starts with "rejected:"');
+		// JOURNEY rules must stay untouched (plan: JOURNEY rules unchanged).
+		expect(CONSOLIDATOR_SYSTEM).toContain("STRICTLY DESCRIPTIVE");
+	});
+});
 
 describe("buildWorkerEnv(consolidator)", () => {
 	it("sets role, run id, and the .memory sandbox root", () => {
@@ -46,6 +77,28 @@ describe("registerConsolidatorTools (scoped to .memory/)", () => {
 	it("refuses to write or edit INDEX.md", async () => {
 		const w = await tools.get("write").execute("1", { path: "INDEX.md", content: "x" });
 		expect(w.content[0].text).toContain("generated automatically");
+		expect(existsSync(join(memoryRoot, "INDEX.md"))).toBe(false);
+	});
+
+	it("tools allow STATE.md and DEATHS.md writes and edits", async () => {
+		const w1 = await tools.get("write").execute("1", { path: "STATE.md", content: "## Goal\nx" });
+		expect(w1.content[0].text).toContain("Wrote STATE.md");
+		expect(existsSync(join(memoryRoot, "STATE.md"))).toBe(true);
+		const e1 = await tools.get("edit").execute("2", { path: "STATE.md", oldText: "x", newText: "y" });
+		expect(e1.content[0].text).toContain("Edited");
+		const w2 = await tools.get("write").execute("3", {
+			path: "DEATHS.md",
+			content: "- rejected: X because Y (verify: src/a.ts#f)",
+		});
+		expect(w2.content[0].text).toContain("Wrote DEATHS.md");
+		expect(readFileSync(join(memoryRoot, "DEATHS.md"), "utf-8")).toContain("rejected: X");
+	});
+
+	it("still forbids INDEX.md writes and edits alongside the new files", async () => {
+		const w = await tools.get("write").execute("1", { path: "INDEX.md", content: "x" });
+		expect(w.content[0].text).toContain("generated automatically");
+		const e = await tools.get("edit").execute("2", { path: "INDEX.md", oldText: "x", newText: "y" });
+		expect(e.content[0].text).toContain("generated automatically");
 		expect(existsSync(join(memoryRoot, "INDEX.md"))).toBe(false);
 	});
 

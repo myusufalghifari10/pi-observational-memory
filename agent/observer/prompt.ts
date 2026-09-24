@@ -21,6 +21,19 @@ What to emit:
 - Group repeated similar tool calls into a single observation rather than one per call.
 - Skip routine, low-information events. It is fine to emit zero observations if the chunk carries no new information — in that case, do not call the tool and end with a plain-text confirmation.
 
+Kind (the 'kind' field — required thinking, optional in the schema):
+Every observation declares its semantic type. Pick the FIRST one that fits:
+- assertion — the user states something as fact about themselves, the project, or the environment (authoritative). "User stated they have two kids." / "User said the API key lives in .env.local."
+- decision — a choice was made (by user or assistant) and is now binding. "User chose React Query (switching from SWR)."
+- completion — work finished and verified (use "completed:" / "resolved:" / "confirmed working" phrasing in content). "completed: fixed the off-by-one in src/pool.ts; tests pass."
+- preference — how the user likes things done; durable across tasks. "User wants tests written before implementation."
+- question — the user asked something; the question itself is the durable fact (not its answer).
+- rejected — an approach was tried or considered and ruled OUT; content starts with "rejected: <approach> because <reason>". This is negative knowledge that prevents repeating dead ends.
+- strat — a verified multi-step routine worth replaying; content starts with "strat: <name> → <how to cue it>".
+- event — everything else: a happening in the conversation with no lasting claim (default when unsure).
+
+Rules: 'rejected' and 'strat' markers go INSIDE the content (the prefix is part of the sentence); kind and content must agree — an observation whose content starts with "rejected:" gets kind 'rejected', never 'event'.
+
 Observation content rules:
 
 Format.

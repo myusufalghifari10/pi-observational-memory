@@ -2,10 +2,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import type { Static } from "typebox";
 import { writeObserverResult, type RawObservation } from "../../src/spawn/runs.js";
+import { OBSERVATION_KINDS } from "../../src/ledger/types.js";
 
 export const OBSERVATION_TIMESTAMP_PATTERN = "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$";
 
-const RecordObservationsSchema = Type.Object({
+// Exported for schema-level tests (tests/observer-kind.test.ts).
+export const RecordObservationsSchema = Type.Object({
 	observations: Type.Array(
 		Type.Object({
 			timestamp: Type.String({
@@ -16,6 +18,16 @@ const RecordObservationsSchema = Type.Object({
 				minLength: 1,
 				description: "Single-line plain prose. No markdown, no tags, no embedded timestamp.",
 			}),
+			// P1.2: semantic kind. The orchestrator re-validates and defaults to "event"
+			// at commit (isObservationKind in src/ids.ts) — schema constrains, code decides.
+			kind: Type.Optional(
+				Type.Union(OBSERVATION_KINDS.map((k) => Type.Literal(k)), {
+					default: "event",
+					description:
+						"Semantic type of this observation: assertion | decision | completion | preference | " +
+						"event | question | rejected | strat. Defaults to event.",
+				}),
+			),
 		}),
 		{ description: "Batch of new observations. Call multiple times until the chunk is fully covered." },
 	),
@@ -59,7 +71,8 @@ export function registerObserverTool(pi: ExtensionAPI, resultPath: string): void
 					continue;
 				}
 				seen.add(key);
-				accumulated.push({ timestamp: obs.timestamp, content });
+				const kind = obs.kind ?? "event";
+				accumulated.push({ timestamp: obs.timestamp, content, kind });
 				added++;
 			}
 			flush();

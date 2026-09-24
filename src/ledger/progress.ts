@@ -4,6 +4,7 @@ import {
 	OM_OBSERVATIONS_RECORDED,
 	type Entry,
 	type MemoryCustomType,
+	type ProvenanceClass,
 } from "./types.js";
 
 const SOURCE_ENTRY_TYPES = new Set(["message", "custom_message", "branch_summary"]);
@@ -35,6 +36,66 @@ export function lastSourceEntryId(entries: Entry[]): string | undefined {
 		if (isSourceEntry(entries[i])) return entries[i].id;
 	}
 	return undefined;
+}
+
+function pad2(n: number): string {
+	return n.toString().padStart(2, "0");
+}
+
+/**
+ * Local minute key ("YYYY-MM-DDTHH:MM") for any parseable timestamp — entry instants and
+ * naive-local id timestamps land in the same coordinate space, so comparisons are
+ * timezone-safe without any Date arithmetic across offsets.
+ */
+function localMinuteKey(value: string | number | undefined): string | undefined {
+	if (value === undefined) return undefined;
+	const d = new Date(value);
+	if (Number.isNaN(d.getTime())) return undefined;
+	return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/** Role → provenance class (L1). Anything message-like and not user/assistant is a tool result. */
+function provenanceOf(entry: Entry): ProvenanceClass {
+	if (entry.type === "custom_message") return "user-asserted";
+	if (entry.type === "message") {
+		const role = (entry.message as { role?: string } | undefined)?.role;
+		if (role === "user") return "user-asserted";
+		if (role === "assistant") return "model-distilled";
+		return "tool-derived";
+	}
+	return "model-distilled"; // branch_summary (model-generated) and anything else
+}
+
+/**
+ * L1 — provenance is derived at the extension boundary, never labeled by an LLM.
+ *
+ * The bounding source entry is the LAST source entry of the slice whose minute is at or
+ * before the observation's minute-resolution base time; when the observation is after every
+ * entry (chunk fallback anchor) the slice's last source entry bounds it. Minute bucketing (not
+ * second) matters: the observer copies source minutes verbatim ("[User @ … 14:30]"), so the
+ * true source entry usually carries seconds INSIDE the observation's minute and must still win.
+ *
+ * Deterministic, pure, no I/O — safe on the render and commit paths alike.
+ */
+export function deriveProvenance(
+	slice: Entry[],
+	obsTimestamp: string,
+): { sourceEntryId: string; provenance: ProvenanceClass } {
+	const sourceEntries = slice.filter(isSourceEntry);
+	const last = sourceEntries[sourceEntries.length - 1];
+	const obsMinute = localMinuteKey(obsTimestamp);
+
+	let bounding: Entry | undefined;
+	if (obsMinute !== undefined) {
+		for (const entry of sourceEntries) {
+			const entryMinute = localMinuteKey(entry.timestamp);
+			if (entryMinute === undefined || entryMinute > obsMinute) continue;
+			bounding = entry;
+		}
+	}
+	bounding = bounding ?? last ?? slice[slice.length - 1];
+	if (!bounding) return { sourceEntryId: "", provenance: "model-distilled" };
+	return { sourceEntryId: bounding.id, provenance: provenanceOf(bounding) };
 }
 
 export function entryIndexById(entries: Entry[]): Map<string, number> {

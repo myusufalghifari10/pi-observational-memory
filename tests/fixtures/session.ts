@@ -1,3 +1,5 @@
+import type { ObservationKind } from "../../src/ledger/types.js";
+
 export type TestEntry = {
 	type: string;
 	id: string;
@@ -17,10 +19,16 @@ export type TestObservation = {
 	timestamp: string;
 	content: string;
 	tokenCount: number;
+	/** P1.1: optional semantic kind (old v1 entries have no kind — C5 backward compat). */
+	kind?: ObservationKind;
+	/** P1.1: optional provenance anchor (assigned at commit by deriveProvenance, L1). */
+	sourceEntryId?: string;
 };
 
 export const OM_OBSERVATIONS_RECORDED = "om.observations.recorded";
 export const OM_OBSERVATIONS_DROPPED = "om.observations.dropped";
+/** P1.3: correction pairs — "believed X → now Y" (L4: losing fact preserved). */
+export const OM_OBSERVATIONS_SUPERSEDED = "om.observations.superseded";
 export const OM_FOLDED = "om.folded";
 export const OM_COST = "om.cost";
 
@@ -160,6 +168,25 @@ export function observationsDroppedEntry(
 		parentId: null,
 		timestamp: DEFAULT_TIMESTAMP,
 		customType: OM_OBSERVATIONS_DROPPED,
+		data: args,
+		...overrides,
+	};
+}
+
+export function observationsSupersededEntry(
+	id: string,
+	args: {
+		pairs: Array<{ oldTimestamp: string; newTimestamp: string; reason: "lexical-supersession" }>;
+		coversUpToId: string;
+	},
+	overrides: Partial<TestEntry> = {},
+): TestEntry {
+	return {
+		type: "custom",
+		id,
+		parentId: null,
+		timestamp: DEFAULT_TIMESTAMP,
+		customType: OM_OBSERVATIONS_SUPERSEDED,
 		data: args,
 		...overrides,
 	};

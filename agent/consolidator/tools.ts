@@ -89,7 +89,8 @@ export function registerConsolidatorTools(pi: ExtensionAPI, memoryRoot: string):
 	pi.registerTool({
 		name: "write",
 		label: "Write memory file",
-		description: "Create or overwrite a topic file under .memory/ (atomic). Do not write INDEX.md.",
+		description:
+			"Create or overwrite a memory file under .memory/ — topic files, JOURNEY.md, STATE.md, DEATHS.md (atomic). Do not write INDEX.md.",
 		parameters: WriteSchema,
 		async execute(_id: string, params: WriteInput): Promise<ToolText> {
 			const abs = scoped(root, params.path);
@@ -103,7 +104,8 @@ export function registerConsolidatorTools(pi: ExtensionAPI, memoryRoot: string):
 	pi.registerTool({
 		name: "edit",
 		label: "Edit memory file",
-		description: "Replace an exact substring in a topic file under .memory/ (atomic).",
+		description:
+			"Replace an exact substring in a memory file under .memory/ — topic files, JOURNEY.md, STATE.md, DEATHS.md (atomic). Do not edit INDEX.md.",
 		parameters: EditSchema,
 		async execute(_id: string, params: EditInput): Promise<ToolText> {
 			const abs = scoped(root, params.path);

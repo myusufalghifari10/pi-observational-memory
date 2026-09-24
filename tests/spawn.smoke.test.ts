@@ -109,8 +109,8 @@ describe("registerObserverTool", () => {
 		});
 
 		expect(readObserverResult(path).observations).toEqual([
-			{ timestamp: "2026-06-25 14:30", content: "first" },
-			{ timestamp: "2026-06-25 14:31", content: "second" },
+			{ timestamp: "2026-06-25 14:30", content: "first", kind: "event" },
+			{ timestamp: "2026-06-25 14:31", content: "second", kind: "event" },
 		]);
 	});
 });

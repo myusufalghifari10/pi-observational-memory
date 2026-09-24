@@ -14,6 +14,7 @@ import {
 	rawTokensSinceLastCompaction,
 	rawTokensSinceObservationCoverage,
 	selectSourceSlice,
+	deriveProvenance,
 } from "../src/ledger/index.js";
 import {
 	branchSummary,
@@ -178,5 +179,59 @@ describe("selectSourceSlice", () => {
 		const slice = selectSourceSlice(entries, "raw-1", 5000);
 		expect(slice.entries).toEqual([]);
 		expect(slice.coversUpToId).toBeUndefined();
+	});
+});
+
+describe("deriveProvenance (L1)", () => {
+	const slice = [
+		rawMessage("u-1000", "hi", { timestamp: "2026-05-02T10:00:00" }),
+		assistantToolCallMessage("a-1005", {}, { timestamp: "2026-05-02T10:05:00" }),
+		toolResultMessage("tr-1007", "output", { timestamp: "2026-05-02T10:07:00" }),
+		textCustomMessage("cm-1010", "note", { timestamp: "2026-05-02T10:10:00" }),
+	];
+
+	it("maps the bounding entry's role to the provenance class", () => {
+		expect(deriveProvenance(slice, "2026-05-02T10:00:30")).toEqual({
+			sourceEntryId: "u-1000",
+			provenance: "user-asserted",
+		});
+		expect(deriveProvenance(slice, "2026-05-02T10:05:00")).toEqual({
+			sourceEntryId: "a-1005",
+			provenance: "model-distilled",
+		});
+		expect(deriveProvenance(slice, "2026-05-02T10:07:45")).toEqual({
+			sourceEntryId: "tr-1007",
+			provenance: "tool-derived",
+		});
+		expect(deriveProvenance(slice, "2026-05-02T10:10:01")).toEqual({
+			sourceEntryId: "cm-1010",
+			provenance: "user-asserted",
+		});
+	});
+
+	it("buckets by minute: an observation inside the source entry's minute binds to that entry", () => {
+		// Same minute as tr-1007 (10:07) — the entry wins even though the id carries :59.
+		expect(deriveProvenance(slice, "2026-05-02T10:07:59").sourceEntryId).toBe("tr-1007");
+		// Minute 10:04 falls between u-1000 (10:00) and a-1005 (10:05) → the earlier entry.
+		expect(deriveProvenance(slice, "2026-05-02T10:04:30").sourceEntryId).toBe("u-1000");
+	});
+
+	it("falls back to the slice's last entry when the observation is after every entry", () => {
+		expect(deriveProvenance(slice, "2026-05-02T11:00:00")).toEqual({
+			sourceEntryId: "cm-1010",
+			provenance: "user-asserted",
+		});
+	});
+
+	it("tolerates entries without timestamps and an empty slice", () => {
+		const noTs = [textCustomMessage("x-1", "a", { timestamp: undefined as unknown as string })];
+		expect(deriveProvenance(noTs, "2026-05-02T10:00:00")).toEqual({
+			sourceEntryId: "x-1",
+			provenance: "user-asserted",
+		});
+		expect(deriveProvenance([], "2026-05-02T10:00:00")).toEqual({
+			sourceEntryId: "",
+			provenance: "model-distilled",
+		});
 	});
 });

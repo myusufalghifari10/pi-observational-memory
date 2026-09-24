@@ -8,6 +8,7 @@ import {
 	observationsRecordedEntry,
 	textCustomMessage,
 	unknownCustomEntry,
+	type TestObservation,
 } from "./fixtures/session.js";
 
 describe("foldLedger (minimal schema, timestamp-keyed)", () => {
@@ -101,5 +102,50 @@ describe("foldLedger (minimal schema, timestamp-keyed)", () => {
 
 		expect(foldLedger(mainBranch).observations.map((o) => o.timestamp)).toEqual(["2026-05-02T10:00:01"]);
 		expect(foldLedger(forkBranch).observations.map((o) => o.timestamp)).toEqual(["2026-05-02T11:00:01"]);
+	});
+
+	it("accepts v1 observations without kind/sourceEntryId (C5 backward compat)", () => {
+		const legacy = observation("2026-05-02T10:00:01"); // no kind, no sourceEntryId
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-1", { observations: [legacy], coversUpToId: "raw-1" }),
+		];
+
+		const folded = foldLedger(entries);
+
+		expect(folded.observations).toHaveLength(1);
+		expect(folded.observations[0].kind).toBeUndefined();
+		expect(folded.observations[0].sourceEntryId).toBeUndefined();
+	});
+
+	it("folds v2 observations carrying kind and sourceEntryId untouched", () => {
+		const typed = observation("2026-05-02T10:00:01", {
+			content: "User stated they prefer dark mode (switching from light)",
+			kind: "assertion",
+			sourceEntryId: "raw-1",
+		});
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-1", { observations: [typed], coversUpToId: "raw-1" }),
+		];
+
+		const folded = foldLedger(entries);
+
+		expect(folded.observations[0].kind).toBe("assertion");
+		expect(folded.observations[0].sourceEntryId).toBe("raw-1");
+	});
+
+	it("ignores a recorded entry whose observation carries an invalid kind", () => {
+		// Deliberately invalid kind: the runtime validator must reject it, so it cannot
+		// satisfy the compile-time union — cast at the fixture boundary only (assertion intact).
+		const bogus = observation("2026-05-02T10:00:01", { kind: "vibes" } as unknown as Partial<TestObservation>);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-1", { observations: [bogus], coversUpToId: "raw-1" }),
+		];
+
+		const folded = foldLedger(entries);
+
+		expect(folded.observations).toEqual([]);
 	});
 });

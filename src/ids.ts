@@ -1,11 +1,16 @@
 import { estimateStringTokens } from "./tokens.js";
 import { redactSecrets } from "./redact.js";
-import type { Observation } from "./ledger/types.js";
+import { deriveProvenance } from "./ledger/progress.js";
+import { isObservationKind, type Entry, type Observation, type ObservationKind } from "./ledger/types.js";
 
-/** What the observer model emits: minute-resolution event time + single-line content. */
+/**
+ * What the observer model emits: minute-resolution event time + single-line content,
+ * plus an optional semantic `kind` (P1.2 schema — validated here, never trusted raw).
+ */
 export type ModelObservation = {
 	timestamp: string; // "YYYY-MM-DD HH:MM"
 	content: string;
+	kind?: string;
 };
 
 const MODEL_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/;
@@ -41,6 +46,12 @@ export type AssignTimestampsOptions = {
 	 * the chunk's last bounding source-entry time (epoch ms or parseable string).
 	 */
 	fallbackAnchor?: number | string;
+	/**
+	 * The dispatched chunk's source entries — provenance derivation (L1): each committed
+	 * observation records the source entry bounding its timestamp. Commit path always passes
+	 * it; pure callers without a slice omit it (then `sourceEntryId` is absent).
+	 */
+	slice?: Entry[];
 };
 
 /**
@@ -49,6 +60,9 @@ export type AssignTimestampsOptions = {
  * orchestrator turns that into a "YYYY-MM-DDTHH:MM:SS[.NN]" id, appending a deterministic
  * ".01", ".02", … disambiguator when two observations resolve to the same second (within the
  * batch or against the existing buffer). `tokenCount` is computed here, never by the model.
+ *
+ * P1.1 (L1): every committed observation also carries `kind` (model-declared, validated,
+ * default "event") and `sourceEntryId` (derived from the slice — never model-declared).
  */
 export function assignObservationTimestamps(
 	modelObservations: ModelObservation[],
@@ -75,7 +89,13 @@ export function assignObservationTimestamps(
 		}
 		used.add(timestamp);
 
-		result.push({ timestamp, content, tokenCount: estimateStringTokens(content) });
+		const kind: ObservationKind = isObservationKind(model.kind) ? model.kind : "event";
+		const observation: Observation = { timestamp, content, tokenCount: estimateStringTokens(content), kind };
+		if (options.slice && options.slice.length > 0) {
+			const { sourceEntryId } = deriveProvenance(options.slice, timestamp);
+			if (sourceEntryId) observation.sourceEntryId = sourceEntryId;
+		}
+		result.push(observation);
 	}
 
 	return result;

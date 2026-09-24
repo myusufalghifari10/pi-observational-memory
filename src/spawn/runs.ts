@@ -15,6 +15,8 @@ import { dirname, join } from "node:path";
 export type RawObservation = {
 	timestamp: string; // "YYYY-MM-DD HH:MM"
 	content: string;
+	/** P1.2 semantic kind as declared by the model; re-validated (default "event") at commit. */
+	kind?: string;
 };
 
 export type ObserverRunResult = {
@@ -70,7 +72,12 @@ export function atomicWrite(path: string, content: string): void {
 function isRawObservation(value: unknown): value is RawObservation {
 	if (!value || typeof value !== "object") return false;
 	const v = value as Record<string, unknown>;
-	return typeof v.timestamp === "string" && typeof v.content === "string" && v.content.trim().length > 0;
+	if (typeof v.timestamp !== "string" || typeof v.content !== "string" || v.content.trim().length === 0) return false;
+	// A non-string kind is dropped (not fatal): the commit path re-validates and defaults.
+	if (v.kind !== undefined && typeof v.kind !== "string") {
+		(v as { kind?: unknown }).kind = undefined;
+	}
+	return true;
 }
 
 /** Parse + validate an observer result file. Throws on malformed input. */

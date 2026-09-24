@@ -13,12 +13,15 @@ import {
 	serializeSourceAddressedBranchEntries,
 	sortObservations,
 	observationToLine,
+	buildObservationsSupersededData,
 	OM_COST,
 	OM_OBSERVATIONS_RECORDED,
+	OM_OBSERVATIONS_SUPERSEDED,
 	type Entry,
 	type Observation,
 	type SourceSlice,
 } from "../ledger/index.js";
+import { detectSupersessions, excludeAlreadySuperseded } from "../ledger/supersede.js";
 import type { Runtime } from "../runtime.js";
 import { buildWorkerArgv, buildWorkerEnv, spawnWorker } from "../spawn/launch.js";
 import { readObserverResult, readWorkerCost, runCostPath, runResultPath } from "../spawn/runs.js";
@@ -375,14 +378,29 @@ async function dispatchObserver(
 
 		const result = readObserverResult(runResultPath(runtime.memoryRoot, runId));
 		const branch = ctx.sessionManager.getBranch();
-		const used = foldLedger(branch).observationsByTimestamp.keys();
+		const folded = foldLedger(branch);
+		const used = folded.observationsByTimestamp.keys();
 		const observations = assignObservationTimestamps(result.observations, {
 			used,
 			fallbackAnchor: lastEntry?.timestamp,
+			slice: slice.entries, // P1.1 (L1): provenance derived from the chunk's source entries
 		});
 
 		if (observations.length > 0) {
 			pi.appendEntry(OM_OBSERVATIONS_RECORDED, { observations, coversUpToId });
+			// P1.3 (L2/L4): deterministic lexical supersession against the pre-commit buffer.
+			// The losing fact is never deleted — its pair renders adjacent ("believed X → now Y").
+			// §2.2 one-to-one: exclude observations that already lost a pair (see
+			// excludeAlreadySuperseded) so the LATEST correction wins instead of being
+			// silently dropped by fold's first-valid-wins on a duplicate losing key.
+			const pairs = detectSupersessions(
+				observations,
+				excludeAlreadySuperseded(folded.activeObservations, folded.supersessions),
+			);
+			const supersededData = buildObservationsSupersededData(pairs, coversUpToId);
+			if (supersededData && isCurrentSession(runtime, gen)) {
+				pi.appendEntry(OM_OBSERVATIONS_SUPERSEDED, supersededData);
+			}
 		}
 		runtime.status.workerDone(runId, observations.length);
 		clearSliceFailure(runtime, coversUpToId);

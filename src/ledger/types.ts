@@ -28,6 +28,12 @@ export const OM_COST = "om.cost";
  * as a user-role turn (convertToLlm rewrites custom → user). See hooks/compaction-trigger.ts.
  */
 export const OM_RESUME = "om.resume";
+/**
+ * Supersession pairs written by the orchestrator at commit when the deterministic lexical
+ * detector (src/ledger/supersede.ts, P1.3) finds a newer fact that overtakes an older one.
+ * Corrections are never deletions (L4): both members stay in the buffer and render adjacent.
+ */
+export const OM_OBSERVATIONS_SUPERSEDED = "om.observations.superseded";
 
 export type Entry = {
 	type: string;
@@ -44,17 +50,44 @@ export type Entry = {
 };
 
 /**
- * Minimal observation unit (decision 9 / L5).
+ * Minimal observation unit (decision 9 / L5, extended v2 in P1.1).
  * - `timestamp`: the orchestrator-assigned precise, unique id-timestamp
  *   ("YYYY-MM-DDTHH:MM:SS" with an optional ".NN" disambiguator). Doubles as the id.
  * - `content`: single-line plain prose.
  * - `tokenCount`: computed in code (never by the model).
+ * - `kind`: v2 semantic type (optional; v1 entries have none and read as "event" — C5).
+ * - `sourceEntryId`: v2 provenance anchor assigned at commit by deriveProvenance (L1).
  */
+export const OBSERVATION_KINDS = [
+	"assertion",
+	"decision",
+	"completion",
+	"preference",
+	"event",
+	"question",
+	"rejected",
+	"strat",
+] as const;
+
+export type ObservationKind = (typeof OBSERVATION_KINDS)[number];
+
+/**
+ * Where an observation's content came from, derived at the extension boundary from the
+ * bounding source entry's role (L1) — never labeled by an LLM.
+ */
+export type ProvenanceClass = "user-asserted" | "tool-derived" | "model-distilled";
+
 export type Observation = {
 	timestamp: string;
 	content: string;
 	tokenCount: number;
+	kind?: ObservationKind;
+	sourceEntryId?: string;
 };
+
+export function isObservationKind(value: unknown): value is ObservationKind {
+	return typeof value === "string" && (OBSERVATION_KINDS as readonly string[]).includes(value);
+}
 
 export type ObservationsRecordedEntryData = {
 	observations: Observation[];
@@ -63,6 +96,18 @@ export type ObservationsRecordedEntryData = {
 
 export type ObservationsDroppedEntryData = {
 	observationTimestamps: string[];
+	coversUpToId: string;
+};
+
+/** One `believed X → now Y` correction (L4: the losing fact is preserved, never rewritten). */
+export type SupersessionPair = {
+	oldTimestamp: string;
+	newTimestamp: string;
+	reason: "lexical-supersession";
+};
+
+export type ObservationsSupersededEntryData = {
+	pairs: SupersessionPair[];
 	coversUpToId: string;
 };
 
@@ -99,6 +144,10 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 export function isObservation(value: unknown): value is Observation {
 	if (!isPlainRecord(value)) return false;
+	// Optional v2 fields validate strictly WHEN PRESENT (invalid ⇒ whole record rejected);
+	// absent fields keep v1 entries valid (C5 backward compat).
+	if (value.kind !== undefined && !isObservationKind(value.kind)) return false;
+	if (value.sourceEntryId !== undefined && !isNonEmptyString(value.sourceEntryId)) return false;
 	return (
 		isNonEmptyString(value.timestamp) &&
 		isNonEmptyString(value.content) &&
@@ -120,6 +169,25 @@ export function isObservationsRecordedData(value: unknown): value is Observation
 export function isObservationsDroppedData(value: unknown): value is ObservationsDroppedEntryData {
 	if (!isPlainRecord(value)) return false;
 	return isNonEmptyStringArray(value.observationTimestamps) && isNonEmptyString(value.coversUpToId);
+}
+
+export function isSupersessionPair(value: unknown): value is SupersessionPair {
+	if (!isPlainRecord(value)) return false;
+	return (
+		isNonEmptyString(value.oldTimestamp) &&
+		isNonEmptyString(value.newTimestamp) &&
+		value.reason === "lexical-supersession"
+	);
+}
+
+export function isObservationsSupersededData(value: unknown): value is ObservationsSupersededEntryData {
+	if (!isPlainRecord(value)) return false;
+	return (
+		Array.isArray(value.pairs) &&
+		value.pairs.length > 0 &&
+		value.pairs.every(isSupersessionPair) &&
+		isNonEmptyString(value.coversUpToId)
+	);
 }
 
 export function isMemoryDetails(value: unknown): value is MemoryDetails {
@@ -175,6 +243,18 @@ export function isObservationsDroppedEntry(entry: Entry): entry is Entry & {
 	return entry.type === "custom" && entry.customType === OM_OBSERVATIONS_DROPPED && isObservationsDroppedData(entry.data);
 }
 
+export function isObservationsSupersededEntry(entry: Entry): entry is Entry & {
+	type: "custom";
+	customType: typeof OM_OBSERVATIONS_SUPERSEDED;
+	data: ObservationsSupersededEntryData;
+} {
+	return (
+		entry.type === "custom" &&
+		entry.customType === OM_OBSERVATIONS_SUPERSEDED &&
+		isObservationsSupersededData(entry.data)
+	);
+}
+
 export function buildObservationsRecordedData(
 	observations: Observation[],
 	coversUpToId: string,
@@ -189,4 +269,12 @@ export function buildObservationsDroppedData(
 ): ObservationsDroppedEntryData | undefined {
 	if (observationTimestamps.length === 0 || !isNonEmptyString(coversUpToId)) return undefined;
 	return { observationTimestamps, coversUpToId };
+}
+
+export function buildObservationsSupersededData(
+	pairs: SupersessionPair[],
+	coversUpToId: string,
+): ObservationsSupersededEntryData | undefined {
+	if (pairs.length === 0 || !isNonEmptyString(coversUpToId)) return undefined;
+	return { pairs, coversUpToId };
 }

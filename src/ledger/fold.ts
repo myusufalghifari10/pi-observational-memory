@@ -1,8 +1,10 @@
 import {
 	isObservationsDroppedData,
 	isObservationsRecordedData,
+	isObservationsSupersededData,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_OBSERVATIONS_SUPERSEDED,
 	type Entry,
 	type Observation,
 } from "./types.js";
@@ -21,6 +23,12 @@ export type FoldedLedger = {
 	droppedObservationTimestamps: Set<string>;
 	/** First-valid observation records by timestamp (id), including dropped ones. */
 	observationsByTimestamp: Map<string, Observation>;
+	/**
+	 * P1.3 — superseded-at map (losing timestamp → winning timestamp), first-valid-record-wins
+	 * keyed by the losing side, matching observation fold semantics. The losing fact is never
+	 * removed (L4); this map only says which fact supersedes it.
+	 */
+	supersessions: Map<string, string>;
 };
 
 function foldEndIndex(entries: Entry[], upToEntryId: string | undefined): number {
@@ -44,6 +52,7 @@ function isCustomEntry(entry: Entry, customType: string): boolean {
 export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): FoldedLedger {
 	const observationsByTimestamp = new Map<string, Observation>();
 	const droppedObservationTimestamps = new Set<string>();
+	const supersessions = new Map<string, string>();
 	const endIdx = foldEndIndex(entries, options.upToEntryId);
 
 	for (let i = 0; i <= endIdx; i++) {
@@ -65,6 +74,17 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 			for (const timestamp of entry.data.observationTimestamps) {
 				droppedObservationTimestamps.add(timestamp);
 			}
+			continue;
+		}
+
+		if (isCustomEntry(entry, OM_OBSERVATIONS_SUPERSEDED)) {
+			if (!isObservationsSupersededData(entry.data)) continue;
+			for (const pair of entry.data.pairs) {
+				// First-valid-record-wins on the losing side, mirroring observation folds.
+				if (!supersessions.has(pair.oldTimestamp)) {
+					supersessions.set(pair.oldTimestamp, pair.newTimestamp);
+				}
+			}
 		}
 	}
 
@@ -78,5 +98,6 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 		activeObservations,
 		droppedObservationTimestamps,
 		observationsByTimestamp,
+		supersessions,
 	};
 }

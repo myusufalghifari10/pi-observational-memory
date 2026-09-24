@@ -10,7 +10,7 @@
  *
  * All writes are atomic (temp + rename) so a reader never sees a half-written file.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 export const INDEX_FILENAME = "INDEX.md";
@@ -20,6 +20,17 @@ export const INDEX_FILENAME = "INDEX.md";
  * topic file: it is excluded from `listTopics`/the memory map and read verbatim at compaction.
  */
 export const JOURNEY_FILENAME = "JOURNEY.md";
+/**
+ * The live task state (forward-looking: goal/constraints/plan/done/blocked/next/open loops).
+ * Consolidator-owned, no front-matter (§2.1 of the reconstruction plan). Read verbatim into
+ * render section [2]; its "Open loops" section is repeated at the block end by the renderer.
+ */
+export const STATE_FILENAME = "STATE.md";
+/**
+ * The rejected-approaches archive (negative knowledge), one `rejected: X because Y` line per
+ * entry (§2.1). Read raw here; P4.1 adds `parseDeaths` + anergy-style revocation.
+ */
+export const DEATHS_FILENAME = "DEATHS.md";
 
 /** The project-level `.memory/` base. Per-session roots live one level below it. */
 export function memoryBaseDir(cwd: string): string {
@@ -47,6 +58,45 @@ export function journeyPath(root: string): string {
 /** Read `.memory/JOURNEY.md` body, trimmed. Returns undefined when missing or effectively empty. */
 export function readJourney(root: string): string | undefined {
 	const path = journeyPath(root);
+	if (!existsSync(path)) return undefined;
+	try {
+		const body = readFileSync(path, "utf-8").trim();
+		return body.length > 0 ? body : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Read `.memory/STATE.md` — the current task state, rendered verbatim into compaction
+ * section [2]. Same shape discipline as `readJourney` (undefined = missing/effectively
+ * empty), plus `updated` derived from the file's mtime: STATE.md has no front-matter by
+ * convention, and the mtime is part of the durable file state the render is a pure
+ * function of, so two renders of the same file yield the same `as of` stamp (C3).
+ */
+export function readState(root: string): { body: string; updated?: string } | undefined {
+	const path = join(root, STATE_FILENAME);
+	if (!existsSync(path)) return undefined;
+	try {
+		const body = readFileSync(path, "utf-8").trim();
+		if (body.length === 0) return undefined;
+		let updated: string | undefined;
+		try {
+			const mtime = statSync(path).mtime;
+			const pad = (n: number): string => n.toString().padStart(2, "0");
+			updated = `${mtime.getFullYear()}-${pad(mtime.getMonth() + 1)}-${pad(mtime.getDate())} ${pad(mtime.getHours())}:${pad(mtime.getMinutes())}`;
+		} catch {
+			// No stamp is better than a failing read: the section still renders.
+		}
+		return { body, updated };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Read `.memory/DEATHS.md` raw, trimmed. Undefined when missing/empty (P4 parses it). */
+export function readDeaths(root: string): string | undefined {
+	const path = join(root, DEATHS_FILENAME);
 	if (!existsSync(path)) return undefined;
 	try {
 		const body = readFileSync(path, "utf-8").trim();
@@ -93,6 +143,9 @@ export type TopicFrontMatter = {
 	title?: string;
 	summary?: string;
 	updated?: string;
+	/** Strat front-matter (P1.5 reader wiring; strats/ files — see `listStrats`). */
+	cue?: string;
+	command?: string;
 	/**
 	 * Repo-relative paths (optionally `path#symbol`) this topic asserts exist in the project.
 	 * Checked model-free at compaction render (see memory/anergy.ts); a topic whose
@@ -160,7 +213,7 @@ export function parseFrontMatter(content: string): { front: TopicFrontMatter; bo
 		) {
 			value = value.slice(1, -1);
 		}
-		if (key === "id" || key === "title" || key === "summary" || key === "updated") {
+		if (key === "id" || key === "title" || key === "summary" || key === "updated" || key === "cue" || key === "command") {
 			front[key] = value;
 			continue;
 		}
@@ -214,4 +267,33 @@ export function listTopics(root: string): Topic[] {
 	}
 	topics.sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0));
 	return topics;
+}
+
+/** A procedural-memory strat file: `.memory/<sessionId>/strats/<name>.md` (§2.1, P4.3). */
+export type Strat = Topic;
+
+/**
+ * List strat files under `<root>/strats/`, sorted by filename — the reader wiring for
+ * render section [7] (P1.5). Returns `[]` when the directory does not exist, so the
+ * renderer omits the section until strats actually exist. Front-matter fields used:
+ * `cue` (what the parent says to cue it), `summary` (one line), `command` (optional).
+ */
+export function listStrats(root: string): Strat[] {
+	const dir = join(root, "strats");
+	if (!existsSync(dir)) return [];
+	const cwd = resolve(root, "..", "..");
+	const strats: Strat[] = [];
+	for (const filename of readdirSync(dir)) {
+		if (!filename.endsWith(".md") || filename.startsWith(".")) continue;
+		let content: string;
+		try {
+			content = readFileSync(join(dir, filename), "utf-8");
+		} catch {
+			continue;
+		}
+		const { front } = parseFrontMatter(content);
+		strats.push({ ...front, path: relative(cwd, join(dir, filename)), filename });
+	}
+	strats.sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0));
+	return strats;
 }

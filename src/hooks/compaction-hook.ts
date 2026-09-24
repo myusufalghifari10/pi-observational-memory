@@ -2,17 +2,19 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { logIfEnabled } from "../debug-log.js";
 import { renderMemoryMap } from "../memory/index-render.js";
 import { checkAnergy } from "../memory/anergy.js";
-import { listTopics, readJourney } from "../memory/paths.js";
+import { listStrats, listTopics, readJourney, readState } from "../memory/paths.js";
 import { resolve } from "node:path";
 import type { Runtime } from "../runtime.js";
 import {
 	buildCompactionProjection,
 	entryIndexById,
+	extractOpenLoops,
+	foldLedger,
 	isObservationsRecordedEntry,
 	isSourceEntry,
 	isValidCutPoint,
 	rawTokensAfterIndex,
-	renderSummary,
+	renderSummaryV2,
 	type Entry,
 } from "../ledger/index.js";
 
@@ -157,15 +159,29 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			});
 			const projection = buildCompactionProjection(branch, snapped);
 			// Phase B: render the long-term tier live from disk, regenerated each compaction
-			// (throwaway projections — cannot decay). The journey is the running descriptive history
-			// the consolidator maintains; the map is the topic-file index.
+			// (throwaway projections — cannot decay). STATE is the forward-looking task state
+			// (P1.5), JOURNEY the descriptive arc, the map the topic-file index.
+			const state = readState(runtime.memoryRoot);
 			const journey = readJourney(runtime.memoryRoot);
 			// Anergy: model-free memory-vs-repo drift check, recomputed per render and never
 			// persisted. On-disk topic files stay untouched — only this injected map flags drift.
 			const topics = listTopics(runtime.memoryRoot);
 			const anergy = checkAnergy(topics, resolve(runtime.memoryRoot, "..", ".."), projection.observations);
 			const map = renderMemoryMap(topics, anergy);
-			const summary = renderSummary(journey, map, projection.observations);
+			// §2.3 block layout via renderSummaryV2 (P1.5, chronological packing mode). Supersession
+			// pairs come from the FULL-branch fold: renderObservationLines only pairs entries that are
+			// both present in the projection, so a winner outside the cutoff degrades the loser to a
+			// plain line instead of stranding it (L4-safe).
+			const folded = foldLedger(branch);
+			const summary = renderSummaryV2({
+				state,
+				journey,
+				map,
+				observations: projection.observations,
+				supersessions: folded.supersessions,
+				strats: listStrats(runtime.memoryRoot),
+				openLoops: state ? extractOpenLoops(state.body) : undefined,
+			});
 
 			return {
 				compaction: {
