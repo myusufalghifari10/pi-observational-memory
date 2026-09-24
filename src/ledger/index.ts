@@ -6,3 +6,4 @@ export * from "./pool.js";
 export * from "./render.js";
 export * from "./serialize.js";
 export * from "./supersede.js";
+export * from "./trust.js";

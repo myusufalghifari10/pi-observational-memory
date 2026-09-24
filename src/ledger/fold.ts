@@ -29,6 +29,13 @@ export type FoldedLedger = {
 	 * removed (L4); this map only says which fact supersedes it.
 	 */
 	supersessions: Map<string, string>;
+	/**
+	 * P2.2 — per observation timestamp: how many `compaction` entries are newer than the
+	 * `om.observations.recorded` entry that FIRST covered it (first-valid-record-wins,
+	 * mirroring `observationsByTimestamp`). Derived during the fold — zero persisted state
+	 * (plan §3 P2.2). Consumed by `buildLineMeta` for the staleness factor of `scoreLine`.
+	 */
+	observationAgeCompactions: Map<string, number>;
 };
 
 function foldEndIndex(entries: Entry[], upToEntryId: string | undefined): number {
@@ -53,17 +60,23 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 	const observationsByTimestamp = new Map<string, Observation>();
 	const droppedObservationTimestamps = new Set<string>();
 	const supersessions = new Map<string, string>();
+	const coveringIndexByTimestamp = new Map<string, number>();
+	const compactionIndices: number[] = [];
 	const endIdx = foldEndIndex(entries, options.upToEntryId);
 
 	for (let i = 0; i <= endIdx; i++) {
 		const entry = entries[i];
 		if (!entry) continue;
 
+		if (entry.type === "compaction") compactionIndices.push(i);
+
 		if (isCustomEntry(entry, OM_OBSERVATIONS_RECORDED)) {
 			if (!isObservationsRecordedData(entry.data)) continue;
 			for (const observation of entry.data.observations) {
 				if (!observationsByTimestamp.has(observation.timestamp)) {
 					observationsByTimestamp.set(observation.timestamp, observation);
+					// First record wins → its index is this line's covering entry (P2.2).
+					coveringIndexByTimestamp.set(observation.timestamp, i);
 				}
 			}
 			continue;
@@ -93,11 +106,22 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 		(observation) => !droppedObservationTimestamps.has(observation.timestamp),
 	);
 
+	// P2.2: age = compaction entries strictly newer than the covering recorded entry.
+	const observationAgeCompactions = new Map<string, number>();
+	for (const [timestamp, coveringIndex] of coveringIndexByTimestamp) {
+		let age = 0;
+		for (const compactionIndex of compactionIndices) {
+			if (compactionIndex > coveringIndex) age++;
+		}
+		observationAgeCompactions.set(timestamp, age);
+	}
+
 	return {
 		observations,
 		activeObservations,
 		droppedObservationTimestamps,
 		observationsByTimestamp,
 		supersessions,
+		observationAgeCompactions,
 	};
 }
