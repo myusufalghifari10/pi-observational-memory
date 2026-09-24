@@ -479,4 +479,61 @@ describe("compaction hook wiring (P1.5 acceptance: §2.3 block actually emitted)
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
+
+	it("P2b Note 4 — L6 fallback e2e: legacy (metadata-less) observations through the REAL hook render byte-identical to chronological", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "om-hook-fallback-"));
+		try {
+			const memoryRoot = join(cwd, ".memory", "test-session");
+			mkdirSync(memoryRoot, { recursive: true });
+			writeFileSync(join(memoryRoot, "STATE.md"), "## Goal\nfix the zebra pipeline\n## Open loops\n- land P2.5\n");
+			writeFileSync(
+				join(memoryRoot, "habitat.md"),
+				"---\nid: habitat\ntitle: Habitat\nsummary: zebra habitat notes\nupdated: 2026-09-25 10:00\n---\nBody.\n",
+			);
+
+			const runtime = new Runtime();
+			runtime.enabled = true;
+			runtime.memoryRoot = memoryRoot;
+
+			const handlers: Record<string, (event: unknown, ctx: unknown) => Promise<unknown>> = {};
+			const pi = {
+				on: (name: string, handler: (event: unknown, ctx: unknown) => Promise<unknown>) => {
+					handlers[name] = handler;
+				},
+			};
+			registerCompactionHook(pi as never, runtime);
+
+			// v1 ledger: the committed observation carries NO kind/sourceEntryId ⇒
+			// buildPackMeta yields an EMPTY map ⇒ the whole pack must take the L6 fallback.
+			const legacy = observation("2026-05-02T10:00:01", { content: "legacy committed fact", tokenCount: 10 });
+			const branch = [
+				rawMessage("e1", "opening message"),
+				observationsRecordedEntry("e2", { observations: [legacy], coversUpToId: "e1" }),
+				rawMessage("e3", "zebra pipeline status?"), // newest user text = the §2.6 query
+			];
+			const ctx = {
+				hasUI: false,
+				cwd,
+				sessionManager: { getBranch: () => branch, getEntries: () => branch },
+			};
+			const result = (await handlers["session_before_compact"](
+				{ preparation: { firstKeptEntryId: "e3", tokensBefore: 500 } },
+				ctx,
+			)) as { compaction?: { summary?: string } } | void;
+			const summary = result?.compaction?.summary ?? "";
+			expect(summary).toContain("legacy committed fact");
+			// The full §2.6 path really ran through the handler: [5] rendered (query matched
+			// STATE + topic) — and STILL the observations section is byte-identical to the
+			// chronological v1 rendering (fallback never half-packs, budget never reorders it).
+			expect(summary).toContain("## Relevant memory");
+			const obsSection = (block: string): string => {
+				const after = block.split("## Observations\n")[1] ?? "";
+				const cut = after.indexOf("\n\n## ");
+				return cut >= 0 ? after.slice(0, cut) : after;
+			};
+			expect(obsSection(summary)).toBe(obsSection(renderSummary(undefined, undefined, [legacy])));
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
 });

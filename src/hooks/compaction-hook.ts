@@ -20,7 +20,11 @@ import {
 	type Entry,
 	type FoldedLedger,
 	type LineMeta,
+	type ScoredLine,
+	type StateDoc,
 } from "../ledger/index.js";
+import { estimateStringTokens } from "../tokens.js";
+import type { Topic } from "../memory/paths.js";
 
 /** Distinct, branch-resolved coversUpToId indices of committed observation chunks, ascending. */
 function chunkBoundaryIndices(branch: Entry[]): number[] {
@@ -141,6 +145,76 @@ export function buildPackMeta(branch: Entry[], folded: FoldedLedger): Map<string
 	return meta;
 }
 
+/**
+ * P2.5 — §2.6 query cap: the last user instruction is bounded before it reaches the
+ * renderer (a 200k-token pasted log must not become the query).
+ */
+export const QUERY_MAX_CHARS = 2_000;
+
+function entryText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return (content as Array<{ type?: string; text?: string }>)
+		.filter((block) => block?.type === "text" && typeof block.text === "string")
+		.map((block) => block.text as string)
+		.join("\n");
+}
+
+/**
+ * P2.5 — §2.6 query: the LAST user/custom_message content on the branch, newest
+ * first so the freshest instruction wins. Hidden `om.*` synthetic messages (the
+ * compaction resume prompt, bridges) are skipped — they are the system's own
+ * voice, not the user's current ask. Bounded to `QUERY_MAX_CHARS`.
+ */
+export function lastUserQuery(branch: Entry[]): string | undefined {
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (!entry) continue;
+		if (entry.type === "custom_message") {
+			if (typeof entry.customType === "string" && entry.customType.startsWith("om.")) continue;
+			const text = entryText(entry.content);
+			if (text.trim()) return text.slice(0, QUERY_MAX_CHARS);
+			continue;
+		}
+		if (entry.type === "message" && entry.message) {
+			const message = entry.message as { role?: string; content?: unknown };
+			if (message.role !== "user") continue;
+			const text = entryText(message.content);
+			if (text.trim()) return text.slice(0, QUERY_MAX_CHARS);
+		}
+	}
+	return undefined;
+}
+
+/**
+ * P2.5 — §2.6 candidate pool: topic summaries + STATE lines, built HERE so the
+ * renderer stays pure (all IO at the boundary). `meta.tokenCount` is the
+ * code-computed estimate; the other LineMeta fields are informational defaults —
+ * §2.6 relevance ignores them and scores purely lexically against the query.
+ */
+export function buildRelevantCandidates(state: StateDoc | undefined, topics: Topic[]): ScoredLine[] {
+	const syntheticMeta = (text: string): LineMeta => ({
+		kind: "event",
+		provenance: "model-distilled",
+		supersessionCount: 0,
+		ageCompactions: 0,
+		tokenCount: estimateStringTokens(text),
+	});
+	const candidates: ScoredLine[] = [];
+	if (state) {
+		state.body.split("\n").forEach((line, index) => {
+			const text = line.trim();
+			if (!text) return;
+			candidates.push({ id: `state:${index}`, text, meta: syntheticMeta(text) });
+		});
+	}
+	for (const topic of topics) {
+		if (!topic.summary) continue;
+		candidates.push({ id: `topic:${topic.path}`, text: topic.summary, meta: syntheticMeta(topic.summary) });
+	}
+	return candidates;
+}
+
 export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void {
 	pi.on("session_before_compact", async (event: any, ctx: any) => {
 		if (!runtime.enabled || runtime.config.passive) return undefined;
@@ -198,12 +272,17 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			// Supersession pairs come from the FULL-branch fold: belief units only pair
 			// entries that are both present in the projection, so a winner outside the
 			// cutoff degrades the loser to a plain line instead of stranding it (L4-safe).
+			// P2.5: §2.6 relevance — query + candidates captured here (render stays pure).
 			const folded = foldLedger(branch);
 			const observationMeta = buildPackMeta(branch, folded);
+			const query = lastUserQuery(branch);
+			const candidates = buildRelevantCandidates(state, topics);
 			const { summary, packExplain } = renderSummaryV2({
 				state,
 				journey,
 				map,
+				query,
+				candidates,
 				observations: projection.observations,
 				supersessions: folded.supersessions,
 				observationMeta,

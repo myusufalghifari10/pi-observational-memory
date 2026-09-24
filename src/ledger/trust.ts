@@ -70,30 +70,66 @@ export function scoreLine(meta: LineMeta): number {
 }
 
 /**
- * Greedy knapsack over score desc, ties broken chronologically (oldest first —
- * on equal trust the longer-lived fact claims the last slot). Never exceeds the
- * budget; every input line lands in exactly one of packed/evicted; a line that
- * does not fit is skipped (a later, smaller line may still fit).
+ * A score/tokens-ranked line — the input shape of the SINGLE admission loop.
+ * `timestamp` doubles as the deterministic tie-break (oldest first); callers keep
+ * any payload on the object (the generic passes it through).
  */
-export function packKnapsack(lines: KnapsackLine[], budget: number): KnapsackResult {
+export type RankedLine = {
+	timestamp: string;
+	score: number;
+	tokens: number;
+};
+
+/**
+ * Greedy admission: rank score desc, ties chronologically (oldest first — on equal
+ * trust the longer-lived fact claims the last slot), then admit while the budget
+ * allows (a line that does not fit is skipped; a later, smaller line may still fit).
+ * Never exceeds the budget. Every admission decision in the system flows through
+ * THIS function — [5] relevance, [6] belief units and packKnapsack all delegate here
+ * (single drift-free logic).
+ */
+export function packRanked<T extends RankedLine>(
+	lines: readonly T[],
+	budget: number,
+): { ranked: T[]; admitted: boolean[] } {
 	const ranked = [...lines].sort((a, b) => {
-		const delta = scoreLine(b.meta) - scoreLine(a.meta);
-		if (delta !== 0) return delta;
+		const delta = b.score - a.score;
+		if (delta !== 0 && !Number.isNaN(delta)) return delta;
 		return a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0;
 	});
-	const packed: KnapsackLine[] = [];
-	const evicted: KnapsackLine[] = [];
+	const admitted: boolean[] = [];
 	let used = 0;
 	for (const line of ranked) {
-		const cost = Math.max(0, line.meta.tokenCount);
+		const cost = Math.max(0, line.tokens);
 		if (used + cost <= budget) {
-			packed.push(line);
 			used += cost;
+			admitted.push(true);
 		} else {
-			evicted.push(line);
+			admitted.push(false);
 		}
 	}
-	return { packed, evicted };
+	return { ranked, admitted };
+}
+
+/**
+ * Greedy knapsack over scoreLine (the §2.2 trust score) — thin wrapper over the
+ * single admission loop in `packRanked`. Output semantics unchanged: `packed` and
+ * `evicted` each preserve ranked order, so every input line lands in exactly one.
+ */
+export function packKnapsack(lines: KnapsackLine[], budget: number): KnapsackResult {
+	const { ranked, admitted } = packRanked(
+		lines.map((line) => ({
+			timestamp: line.timestamp,
+			score: scoreLine(line.meta),
+			tokens: line.meta.tokenCount,
+			source: line,
+		})),
+		budget,
+	);
+	return {
+		packed: ranked.filter((_, index) => admitted[index]).map((entry) => entry.source),
+		evicted: ranked.filter((_, index) => !admitted[index]).map((entry) => entry.source),
+	};
 }
 
 /**
