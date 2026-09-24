@@ -7,6 +7,8 @@ import { resolve } from "node:path";
 import type { Runtime } from "../runtime.js";
 import {
 	buildCompactionProjection,
+	buildLineMeta,
+	deriveProvenance,
 	entryIndexById,
 	extractOpenLoops,
 	foldLedger,
@@ -16,6 +18,8 @@ import {
 	rawTokensAfterIndex,
 	renderSummaryV2,
 	type Entry,
+	type FoldedLedger,
+	type LineMeta,
 } from "../ledger/index.js";
 
 /** Distinct, branch-resolved coversUpToId indices of committed observation chunks, ascending. */
@@ -115,6 +119,28 @@ export function canSkipObserverWait(
 	return true;
 }
 
+/**
+ * P2.3 — per-observation LineMeta for the section [6] knapsack, derived with zero
+ * persisted state. An observation enters the map only when it carries full v2
+ * metadata (kind + a sourceEntryId resolving in this branch); renderSummaryV2
+ * treats ANY missing entry as the L6 trigger and renders the whole pack
+ * chronologically — never a half-packed hybrid. Provenance is re-derived at the
+ * boundary from the anchored source entry (L1): the class depends only on that
+ * entry's role, so a one-entry slice is exact.
+ */
+export function buildPackMeta(branch: Entry[], folded: FoldedLedger): Map<string, LineMeta> {
+	const byId = new Map(branch.map((entry) => [entry.id, entry]));
+	const meta = new Map<string, LineMeta>();
+	for (const observation of folded.observations) {
+		if (!observation.kind || !observation.sourceEntryId) continue;
+		const source = byId.get(observation.sourceEntryId);
+		if (!source) continue;
+		const { provenance } = deriveProvenance([source], observation.timestamp);
+		meta.set(observation.timestamp, buildLineMeta(folded, observation, provenance));
+	}
+	return meta;
+}
+
 export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void {
 	pi.on("session_before_compact", async (event: any, ctx: any) => {
 		if (!runtime.enabled || runtime.config.passive) return undefined;
@@ -168,19 +194,27 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			const topics = listTopics(runtime.memoryRoot);
 			const anergy = checkAnergy(topics, resolve(runtime.memoryRoot, "..", ".."), projection.observations);
 			const map = renderMemoryMap(topics, anergy);
-			// §2.3 block layout via renderSummaryV2 (P1.5, chronological packing mode). Supersession
-			// pairs come from the FULL-branch fold: renderObservationLines only pairs entries that are
-			// both present in the projection, so a winner outside the cutoff degrades the loser to a
-			// plain line instead of stranding it (L4-safe).
+			// §2.3 block layout via renderSummaryV2 (P2.3: knapsack-packed, L6 fallback).
+			// Supersession pairs come from the FULL-branch fold: belief units only pair
+			// entries that are both present in the projection, so a winner outside the
+			// cutoff degrades the loser to a plain line instead of stranding it (L4-safe).
 			const folded = foldLedger(branch);
-			const summary = renderSummaryV2({
+			const observationMeta = buildPackMeta(branch, folded);
+			const { summary, packExplain } = renderSummaryV2({
 				state,
 				journey,
 				map,
 				observations: projection.observations,
 				supersessions: folded.supersessions,
+				observationMeta,
 				strats: listStrats(runtime.memoryRoot),
 				openLoops: state ? extractOpenLoops(state.body) : undefined,
+			});
+			logIfEnabled(runtime.config.debugLog, "render.pack", {
+				fallback: packExplain.fallback,
+				admitted: packExplain.lines.filter((line) => line.admitted).length,
+				evicted: packExplain.lines.filter((line) => !line.admitted).length,
+				lines: packExplain.lines,
 			});
 
 			return {

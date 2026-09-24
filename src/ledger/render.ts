@@ -1,4 +1,8 @@
+import { scoreLine, type LineMeta } from "./trust.js";
 import type { Observation } from "./types.js";
+
+/** §2.3 token budget shared by sections [5]+[6]; reserved sections are exempt (L7). */
+export const RENDER_BUDGET_TOKENS = 18_000;
 
 const CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in this session.
 
@@ -39,13 +43,11 @@ export function renderSummary(journey: string | undefined, map: string | undefin
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// renderSummaryV2 — the §2.3 block layout (P1.5: CHRONOLOGICAL packing mode).
+// renderSummaryV2 — the §2.3 block layout (P1.5 chronological seam; P2.3 packing).
 //
-// Seams left for later phases by the P1.5 contract:
-//   [5] RELEVANT MEMORY — P2.5 packs lexical candidates here (section omitted now).
-//   [6] packing          — P2.3 replaces chronological order with the knapsack and
-//                          changes this function's return to { summary, packExplain }
-//                          (TODO(P2.3)).
+// Seams left for later phases:
+//   [5] RELEVANT MEMORY — candidates/budget inputs are accepted from P2.3, but the
+//                          section still renders nothing until P2.5 (TODO(P2.5)).
 //   [8] UNOBSERVED WINDOW markers — P3.1 appends them from `om.observations.gap`
 //                          entries (attempts >= 2); render NOTHING for gaps now
 //                          (TODO(P3.1)).
@@ -53,6 +55,31 @@ export function renderSummary(journey: string | undefined, map: string | undefin
 // C3 still holds: every input below is durable state handed in by the caller — no
 // clock, no randomness, no I/O — so identical input yields byte-identical output.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** P2.5 candidate line for section [5] (accepted here; rendered from P2.5 on). */
+export type ScoredLine = {
+	id: string;
+	text: string;
+	meta: LineMeta;
+};
+
+/** Why a line landed where it did — the ContextPipe EXPLAIN ANALYZE analog (§2.2). */
+export type PackExplainReason = "packed" | "evicted-budget" | "fallback-chronological";
+
+export type PackExplainLine = {
+	/** The observation's timestamp id. */
+	id: string;
+	/** The admission-determining score: a belief group's terminal winner score (§2.2). */
+	score: number;
+	admitted: boolean;
+	reason: PackExplainReason;
+};
+
+export type PackExplain = {
+	/** true ⇒ L6 fired: the WHOLE section rendered in chronological order. */
+	fallback: boolean;
+	lines: PackExplainLine[];
+};
 
 /** STATE.md as read from disk: opaque body + optional `as of` stamp (see paths.readState). */
 export type StateDoc = {
@@ -78,11 +105,21 @@ export type RenderSummaryV2Input = {
 	journey?: string;
 	/** [4] Pre-rendered memory map (renderMemoryMap output, already heading-owning). */
 	map?: string;
-	// [5] TODO(P2.5): candidates + budget for RELEVANT MEMORY.
-	/** [6] Active observations, rendered in today's chronological order. */
+	// [5] RELEVANT MEMORY — candidates + budget accepted (P2.3); section still omitted
+	// until P2.5 renders lexical top-k here (TODO(P2.5)).
+	candidates?: ScoredLine[];
+	/** [6] Active observations. */
 	observations: Observation[];
 	/** fold.supersessions — losing ts → winning ts; renders believed/now pairs (L4). */
 	supersessions?: Map<string, string>;
+	/**
+	 * [6] Per-observation metadata for packing. Missing ANY entry for a rendered
+	 * observation ⇒ L6 whole-pack chronological fallback (never a half-packed hybrid);
+	 * an absent map with observations present takes the same fallback.
+	 */
+	observationMeta?: Map<string, LineMeta>;
+	/** [5]+[6] shared token budget (default RENDER_BUDGET_TOKENS; reserved sections exempt). */
+	budget?: number;
 	/** [7] Strat entries; empty ⇒ section omitted. */
 	strats?: StratLine[];
 	/** [8] STATE's Open-loops body, already extracted (see `extractOpenLoops`). */
@@ -114,24 +151,28 @@ export function extractOpenLoops(stateBody: string): string | undefined {
 }
 
 /**
- * Section [6] in chronological order, with corrections rendered adjacent (L4: every losing
- * fact is preserved, never deleted).
- *
- * Corrections form CHAINS across batches — the detector intentionally lets a prior winner be
- * superseded again (`a→b→c`, the plan's PostgreSQL→MySQL→SQLite scenario), and one winner can
- * absorb several losers (`a→c, b→c`). This renderer therefore groups each connected component:
- * every observation is walked along its present-in-both edges to its terminal winner, and the
- * whole group is emitted at its earliest member's chronological slot — all members labelled
- * `believed:` except the terminal winner, which gets `now:`. Every fact appears exactly once.
- *
- * Degradations (both deterministic, both loss-free):
- * - groups of one — no in-projection edge, including a loser whose winner sits outside the
- *   projection (e.g. in the verbatim tail) — render as a plain chronological line;
- * - malformed cycles (impossible in practice: each correction's winner is the newer batch)
- *   render every reachable member as a plain line — no fact is lost, no loop can spin.
+ * One packable belief unit: a chronological member list plus its terminal winner.
+ * Singletons (no in-projection correction edge) pack/emit as plain lines; groups of
+ * two or more are the `believed:`/`now:` belief clusters that must never be split.
  */
-function renderObservationLines(sorted: Observation[], supersessions?: Map<string, string>): string[] {
-	if (!supersessions || supersessions.size === 0) return sorted.map(observationToLine);
+type BeliefUnit = {
+	members: Observation[];
+	/** Terminal winner timestamp — the `now:` label and the packing score source. */
+	terminal: string;
+};
+
+/**
+ * Group `sorted` observations into belief units, preserving the P1.5 emission order:
+ * each unit is visited at its EARLIEST member's chronological slot (first-encounter
+ * walk over `sorted`). Chain/V-merge/cycle degradations are exactly the P1.5 ones:
+ * - a member whose correction edge leaves the projection (winner outside) or a cycle
+ *   member degrades to a singleton unit — plain chronological line, no fact lost;
+ * - a multi-member unit's terminal winner is the key the edges walked to.
+ */
+function buildBeliefUnits(sorted: Observation[], supersessions?: Map<string, string>): BeliefUnit[] {
+	if (!supersessions || supersessions.size === 0) {
+		return sorted.map((observation) => ({ members: [observation], terminal: observation.timestamp }));
+	}
 	const present = new Set(sorted.map((o) => o.timestamp));
 	// Chain edges restricted to pairs whose BOTH ends are in the rendered set (a winner
 	// outside the projection must degrade its loser to a plain line, not strand it).
@@ -139,7 +180,9 @@ function renderObservationLines(sorted: Observation[], supersessions?: Map<strin
 	for (const [oldTimestamp, newTimestamp] of supersessions) {
 		if (present.has(oldTimestamp) && present.has(newTimestamp)) nextOf.set(oldTimestamp, newTimestamp);
 	}
-	if (nextOf.size === 0) return sorted.map(observationToLine);
+	if (nextOf.size === 0) {
+		return sorted.map((observation) => ({ members: [observation], terminal: observation.timestamp }));
+	}
 
 	// Walk each member to its terminal winner; undefined = malformed cycle.
 	const terminalOf = new Map<string, string | undefined>();
@@ -158,7 +201,7 @@ function renderObservationLines(sorted: Observation[], supersessions?: Map<strin
 		terminalOf.set(observation.timestamp, current);
 	}
 
-	// Group members by terminal winner, in chronological order (iterate `sorted`).
+	// Group members by terminal winner (cycle members keep terminalOf undefined → singletons).
 	const groups = new Map<string, string[]>();
 	for (const observation of sorted) {
 		const terminal = terminalOf.get(observation.timestamp);
@@ -169,32 +212,33 @@ function renderObservationLines(sorted: Observation[], supersessions?: Map<strin
 	}
 
 	const byTimestamp = new Map(sorted.map((o) => [o.timestamp, o]));
-	const lines: string[] = [];
+	const units: BeliefUnit[] = [];
 	const emitted = new Set<string>();
 	for (const observation of sorted) {
 		const ts = observation.timestamp;
 		if (emitted.has(ts)) continue;
 		const terminal = terminalOf.get(ts);
 		const group = terminal === undefined ? undefined : groups.get(terminal);
-		if (!group || group.length === 1) {
-			// Singleton (no in-projection edge) or cycle member: plain chronological line.
-			lines.push(observationToLine(observation));
+		if (terminal === undefined || !group || group.length === 1) {
+			units.push({ members: [observation], terminal: ts });
 			emitted.add(ts);
 			continue;
 		}
-		// Whole belief group, chronological: every member `believed:` except the winner.
-		for (const memberTs of group) {
-			const member = byTimestamp.get(memberTs);
-			if (!member) continue; // defensive: groups are built from `sorted`
-			lines.push(
-				memberTs === terminal
-					? `${member.timestamp}  now: ${member.content}`
-					: `${member.timestamp}  believed: ${member.content}`,
-			);
-			emitted.add(memberTs);
-		}
+		const members = group.map((memberTs) => byTimestamp.get(memberTs)).filter((m): m is Observation => !!m);
+		units.push({ members, terminal });
+		for (const memberTs of group) emitted.add(memberTs);
 	}
-	return lines;
+	return units;
+}
+
+/** Render one belief unit: plain line for a singleton, adjacent believed/now labels for a group. */
+function unitLines(unit: BeliefUnit): string[] {
+	if (unit.members.length === 1) return [observationToLine(unit.members[0])];
+	return unit.members.map((member) =>
+		member.timestamp === unit.terminal
+			? `${member.timestamp}  now: ${member.content}`
+			: `${member.timestamp}  believed: ${member.content}`,
+	);
 }
 
 /** Section [7] one-liners: `<name> — <summary> `<path>`, name = cue || filename stem. */
@@ -210,14 +254,15 @@ function renderStratLines(strats: StratLine[]): string[] {
  * Render the deterministic compaction block in the §2.3 layout (reading order):
  *   [1] instructions   [2] STATE (as of …)   [3] JOURNEY   [4] MEMORY MAP
  *   [5] RELEVANT MEMORY (P2.5 — omitted until then)
- *   [6] OBSERVATIONS (chronological at P1.5; supersession pairs adjacent)
+ *   [6] OBSERVATIONS (knapsack-packed belief units under RENDER_BUDGET_TOKENS;
+ *       L6 fallback ⇒ chronological; supersession pairs adjacent)
  *   [7] STRATS (omitted when empty)
  *   [8] OPEN LOOPS — the recency anchor, always the LAST section (P3.1 gap markers append here)
  *
  * Every section except [1] is omitted wholesale when empty, so an all-empty input returns ""
  * (delegating to pi's native summarizer, as v1 did).
  */
-export function renderSummaryV2(input: RenderSummaryV2Input): string {
+export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string; packExplain: PackExplain } {
 	const observations = input.observations ?? [];
 	const sorted = sortObservations(observations);
 	const strats = input.strats ?? [];
@@ -226,7 +271,72 @@ export function renderSummaryV2(input: RenderSummaryV2Input): string {
 	const mapText = input.map?.trim();
 	const openLoops = input.openLoops?.trim();
 
-	if (!stateBody && !journeyText && !mapText && strats.length === 0 && sorted.length === 0) return "";
+	if (!stateBody && !journeyText && !mapText && strats.length === 0 && sorted.length === 0) {
+		return { summary: "", packExplain: { fallback: false, lines: [] } };
+	}
+
+	const units = buildBeliefUnits(sorted, input.supersessions);
+	const metaByTimestamp = input.observationMeta;
+	// L6: absent or PARTIAL metadata ⇒ the WHOLE section renders in chronological order,
+	// byte-identical to the P1 output — an upgrade can never regress old data.
+	const fallback = sorted.some((observation) => !metaByTimestamp?.has(observation.timestamp));
+	let observationLines: string[];
+	let packExplain: PackExplain;
+	if (fallback) {
+		observationLines = units.flatMap(unitLines);
+		packExplain = {
+			fallback: true,
+			lines: sorted.map((observation) => {
+				const meta = metaByTimestamp?.get(observation.timestamp);
+				return {
+					id: observation.timestamp,
+					score: meta ? scoreLine(meta) : 0,
+					admitted: true,
+					reason: "fallback-chronological" as const,
+				};
+			}),
+		};
+	} else {
+		// Complete metadata: greedy pack over belief UNITS — score desc (§2.2 score of the
+		// unit's terminal winner), tie → earliest member timestamp asc (chronological). A
+		// unit's cost is the SUM of its members' tokens, so a correction pair can never be
+		// split by the budget (L4). NOTE: packKnapsack (trust) packs single lines whose score
+		// derives from the same tokenCount it budgets — belief groups split score/tokens and
+		// need this unit-aware pass; single-line packs ([5]) keep packKnapsack from P2.5 on.
+		const meta = metaByTimestamp as Map<string, LineMeta>; // fallback===false ⇒ present & complete
+		const ranked = units.map((unit) => {
+			const winner =
+				unit.members.find((member) => member.timestamp === unit.terminal) ?? unit.members[unit.members.length - 1];
+			return {
+				unit,
+				score: scoreLine(meta.get(winner.timestamp)!),
+				tokens: unit.members.reduce((sum, member) => sum + (meta.get(member.timestamp)?.tokenCount ?? 0), 0),
+				earliest: unit.members[0].timestamp,
+			};
+		});
+		ranked.sort((a, b) =>
+			b.score !== a.score ? b.score - a.score : a.earliest < b.earliest ? -1 : a.earliest > b.earliest ? 1 : 0,
+		);
+		const budget = input.budget ?? RENDER_BUDGET_TOKENS;
+		let used = 0;
+		const admitted = ranked.map((rank) => {
+			if (used + rank.tokens > budget) return false;
+			used += rank.tokens;
+			return true;
+		});
+		observationLines = ranked.flatMap((rank, index) => (admitted[index] ? unitLines(rank.unit) : []));
+		packExplain = {
+			fallback: false,
+			lines: ranked.flatMap((rank, index) =>
+				rank.unit.members.map((member) => ({
+					id: member.timestamp,
+					score: rank.score, // the admission-determining score (unit's terminal winner)
+					admitted: admitted[index],
+					reason: (admitted[index] ? "packed" : "evicted-budget") as PackExplainReason,
+				})),
+			),
+		};
+	}
 
 	const parts: string[] = [input.instructions ?? CONTEXT_USAGE_INSTRUCTIONS];
 
@@ -240,11 +350,11 @@ export function renderSummaryV2(input: RenderSummaryV2Input): string {
 	// [4] MEMORY MAP — passed through (heading, anergy flags and death stubs are the
 	// map renderer's business, not ours).
 	if (mapText) parts.push(mapText);
-	// [5] TODO(P2.5): RELEVANT MEMORY — lexical top-k candidates against the last user
-	// instruction; section omitted at P1.5 by contract.
-	// [6] OBSERVATIONS — chronological at P1.5; knapsack from P2.3.
-	if (sorted.length > 0) {
-		parts.push(`## Observations\n${renderObservationLines(sorted, input.supersessions).join("\n")}`);
+	// [5] RELEVANT MEMORY — TODO(P2.5): pack `input.candidates` as lexical top-k here;
+	// until then the section is omitted and [6] receives the whole budget.
+	// [6] OBSERVATIONS — knapsack-packed belief units (P2.3); L6 fallback ⇒ chronological.
+	if (observationLines.length > 0) {
+		parts.push(`## Observations\n${observationLines.join("\n")}`);
 	}
 	// [7] STRATS — omitted when the registry is empty.
 	if (strats.length > 0) parts.push(`## Strats\n${renderStratLines(strats).join("\n")}`);
@@ -253,5 +363,5 @@ export function renderSummaryV2(input: RenderSummaryV2Input): string {
 	// entries (attempts >= 2) right after this section; render nothing for gaps until then.
 	if (openLoops) parts.push(`## Open loops\n${openLoops}`);
 
-	return parts.join("\n\n");
+	return { summary: parts.join("\n\n"), packExplain };
 }
