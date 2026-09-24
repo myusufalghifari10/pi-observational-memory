@@ -12,8 +12,8 @@
  * Seeding is idempotent — once the dir exists it is never re-seeded, so resume and /tree never
  * disturb it. The transient `.runs/` IPC directory is excluded.
  */
-import { cpSync, existsSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { basename, sep } from "node:path";
+import { cpSync, existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { basename, join, sep } from "node:path";
 import { sessionMemoryRoot } from "./paths.js";
 
 type SessionCtx = {
@@ -52,6 +52,40 @@ function parentMemoryRoot(ctx: SessionCtx): string | undefined {
 /** True for any path inside a `.runs` directory (transient IPC; never seeded). */
 function isRunsPath(p: string): boolean {
 	return basename(p) === ".runs" || p.includes(`${sep}.runs${sep}`);
+}
+
+/** Max age of a `.runs/` IPC file before GC. Files are transient worker result/cost handoffs. */
+export const RUNS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (P0.7)
+
+/**
+ * P0.7 — bound `.runs/` growth. The result/cost IPC files were never garbage-collected, so a
+ * long-lived project accumulated them without limit (a documented v1 trade-off). Called at
+ * `session_start` on this session's root only; best-effort, never throws — GC must not be able
+ * to break a session start. Recent files are kept: an in-flight worker's result/cost handoff
+ * could still be read after a restart.
+ */
+export function collectRuns(root: string, maxAgeMs: number = RUNS_MAX_AGE_MS, now: number = Date.now()): number {
+	const runsDir = join(root, ".runs");
+	if (!existsSync(runsDir)) return 0;
+	let removed = 0;
+	try {
+		for (const name of readdirSync(runsDir)) {
+			const path = join(runsDir, name);
+			try {
+				const stat = statSync(path);
+				if (!stat.isFile()) continue;
+				if (now - stat.mtimeMs > maxAgeMs) {
+					unlinkSync(path);
+					removed++;
+				}
+			} catch {
+				// best-effort per file
+			}
+		}
+	} catch {
+		// best-effort overall
+	}
+	return removed;
 }
 
 /**

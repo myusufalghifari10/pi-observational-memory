@@ -33,7 +33,13 @@ import { renderIndexFile } from "../memory/index-render.js";
 import { atomicWrite, indexPath, listTopics, readJourney } from "../memory/paths.js";
 import type { Runtime } from "../runtime.js";
 import { buildWorkerArgv, buildWorkerEnv, spawnWorker } from "../spawn/launch.js";
-import { recordWorkerCost, pumpWorkerQueue } from "./observer-trigger.js";
+import {
+	recordWorkerCost,
+	pumpWorkerQueue,
+	isCurrentSession,
+	noteWorkerFailure,
+	clearWorkerFailures,
+} from "./observer-trigger.js";
 
 type TriggerCtx = {
 	hasUI: boolean;
@@ -81,6 +87,8 @@ function buildConsolidatorPrompt(memoryRoot: string, promote: Observation[], jou
 
 export function evaluateConsolidatorTrigger(pi: ExtensionAPI, runtime: Runtime, ctx: TriggerCtx): void {
 	if (!runtime.enabled || runtime.config.passive) return;
+	// P0.4: circuit breaker — a paused pipeline never dispatches.
+	if (runtime.pipelinePaused) return;
 	if (runtime.consolidatorInFlight) return;
 	// Serial mode: the single worker slot must be free of observers before consolidating.
 	if (runtime.config.serialWorkers && runtime.observersInFlight.size > 0) return;
@@ -107,6 +115,9 @@ async function dispatchConsolidator(
 	ctx: TriggerCtx,
 	promote: Observation[],
 ): Promise<void> {
+	// P0.1: capture the session generation at dispatch — every commit-side effect below is
+	// gated on it, so a session replacement mid-flight discards this worker's result.
+	const gen = runtime.generation;
 	const runId = nextRunId();
 	const controller = new AbortController();
 	runtime.consolidatorController = controller;
@@ -121,8 +132,14 @@ async function dispatchConsolidator(
 		});
 		const env = buildWorkerEnv("consolidator", { memoryRoot: runtime.memoryRoot, runId });
 		const exit = await spawnWorker({ argv, cwd: runtime.memoryRoot, env, signal: controller.signal });
+		// P0.1: session replaced while the worker ran — discard silently (no cost, no tombstone,
+		// no INDEX rewrite, no toasts).
+		if (!isCurrentSession(runtime, gen)) {
+			logIfEnabled(runtime.config.debugLog, "consolidator.stale-discard", { exitCode: exit.code }, runId);
+			return;
+		}
 		// Capture cost before the exit-code check so a partial run's spend is still recorded.
-		recordWorkerCost(pi, runtime, ctx, "consolidator", runId);
+		recordWorkerCost(pi, runtime, ctx, "consolidator", runId, gen);
 		if (exit.code !== 0) {
 			throw new Error(`consolidator exited with code ${exit.code}${exit.stderr ? `: ${exit.stderr.trim().slice(0, 200)}` : ""}`);
 		}
@@ -146,20 +163,28 @@ async function dispatchConsolidator(
 
 		logIfEnabled(runtime.config.debugLog, "consolidator.settle", { outcome: "ok", exitCode: exit.code, dropped: toDrop.length, handed: promote.length }, runId);
 		runtime.status.workerDone(runId, toDrop.length);
+		clearWorkerFailures(runtime); // P0.4: any success proves recovery
 		runtime.refreshFooterGauges(ctx.sessionManager.getBranch(), ctx.getContextUsage?.()?.tokens ?? null);
 		if (ctx.hasUI && ctx.ui) {
 			runtime.queueToast(`om: consolidator promoted ${toDrop.length} obs`, "info", ctx.ui.notify.bind(ctx.ui));
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		// P0.1: stale session — discard without lastWorkerError, status, or toast.
+		if (!isCurrentSession(runtime, gen)) {
+			logIfEnabled(runtime.config.debugLog, "consolidator.stale-discard", { error: message }, runId);
+			return;
+		}
 		runtime.lastWorkerError = message;
+		noteWorkerFailure(runtime, ctx.hasUI && ctx.ui ? (m, l) => ctx.ui!.notify(m, l) : undefined); // P0.4
 		logIfEnabled(runtime.config.debugLog, "consolidator.settle", { outcome: "error", error: message }, runId);
 		runtime.status.workerError(runId);
 		if (ctx.hasUI) ctx.ui?.notify(`om: consolidator failed: ${message}`, "error");
 	} finally {
 		runtime.consolidatorController = undefined;
 		runtime.consolidatorInFlight = false;
-		pumpWorkerQueue(pi, runtime, ctx);
+		// P0.1: never re-drive the queue from a completion that no longer belongs to this session.
+		if (isCurrentSession(runtime, gen)) pumpWorkerQueue(pi, runtime, ctx);
 	}
 }
 

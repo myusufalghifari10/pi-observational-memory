@@ -1,4 +1,5 @@
 import type { Message, TextContent, ToolResultMessage } from "@earendil-works/pi-ai";
+import { redactSecrets } from "../redact.js";
 
 function pad(n: number): string {
 	return n.toString().padStart(2, "0");
@@ -18,7 +19,16 @@ export function nowTimestamp(): string {
 	return fmtLocal(new Date());
 }
 
-export const MAX_RECORD_CONTENT_CHARS = 10_000;
+/**
+ * Cap applied when serializing TOOL-RESULT records into an observer chunk (P0.6).
+ *
+ * Only tool results are capped: a single oversized result (a 500 KB `read`, a huge
+ * `grep`/`ls -R` dump) would otherwise become one un-splittable chunk that the observer model
+ * cannot even fit in its own context — the chunk boundary is a budget for *selecting* entries,
+ * not a guarantee about entry size. User and assistant text is NEVER truncated: a long user
+ * message is a deliberate assertion and must reach the observer verbatim.
+ */
+export const MAX_RECORD_CONTENT_CHARS = 40_000;
 
 export function truncateRecordContent(content: string): string {
 	if (content.length <= MAX_RECORD_CONTENT_CHARS) return content;
@@ -83,7 +93,8 @@ export function serializeConversation(messages: Message[]): string {
 				if (!body) return null;
 				return `[Assistant @ ${time}]: ${body}`;
 			}
-			return `[Tool result for ${(msg as ToolResultMessage).toolName} @ ${time}]: ${textOnly(msg.content)}`;
+			// P0.6: cap tool-result records only — see MAX_RECORD_CONTENT_CHARS.
+			return `[Tool result for ${(msg as ToolResultMessage).toolName} @ ${time}]: ${truncateRecordContent(textOnly(msg.content))}`;
 		})
 		.filter((line): line is string => line !== null)
 		.join("\n\n");
@@ -158,5 +169,7 @@ export function serializeSourceAddressedBranchEntries(entries: RenderableEntry[]
 		sourceEntryIds.push(entry.id);
 		blocks.push(`[Source entry id: ${entry.id}]\n${rendered}`);
 	}
-	return { text: blocks.join("\n\n"), sourceEntryIds };
+	// P0.10 egress point #1: chunk text leaves the master for a subprocess (and is recorded
+	// in that worker's session), so secrets are stripped here — before the worker ever sees them.
+	return { text: redactSecrets(blocks.join("\n\n")), sourceEntryIds };
 }

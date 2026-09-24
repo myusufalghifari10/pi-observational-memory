@@ -39,10 +39,29 @@ fi
 say "dependencies installed"
 
 # ── 3. Sanity: typecheck (+ optional full tests) ──────────────────────────────
-npx tsc --noEmit >/dev/null 2>&1 || fail "typecheck failed — the clone may be corrupt; re-clone and retry"
+# P0.9: keep the real diagnostics — a swallowed tsc error just told the user to "re-clone",
+# which is never the actual cause. Capture the output and replay it only on failure.
+SANITY_LOG=$(mktemp "${TMPDIR:-/tmp}/om-install.XXXXXX")
+trap 'rm -f "$SANITY_LOG"' EXIT INT TERM
+
+if ! npx tsc --noEmit >"$SANITY_LOG" 2>&1; then
+  say ""
+  say "typecheck failed — full diagnostics below:"
+  say "--------------------------------------------------"
+  sed 's/^/  /' "$SANITY_LOG"
+  say "--------------------------------------------------"
+  fail "typecheck failed (see diagnostics above)"
+fi
 say "typecheck ok"
 if [ "$RUN_TESTS" -eq 1 ]; then
-  npx vitest run >/dev/null 2>&1 || fail "test suite failed — do not register; please open an issue with this output"
+  if ! npx vitest run >"$SANITY_LOG" 2>&1; then
+    say ""
+    say "test suite failed — full output below:"
+    say "--------------------------------------------------"
+    sed 's/^/  /' "$SANITY_LOG"
+    say "--------------------------------------------------"
+    fail "test suite failed (see output above) — do not register; please open an issue with this log"
+  fi
   say "tests ok"
 fi
 

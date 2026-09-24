@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { DEFAULTS, mergeSettingsConfig } from "../src/config.js";
+import { Runtime } from "../src/runtime.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("mergeSettingsConfig (global layer then project layer)", () => {
 	it("keeps the global provider/id when the project layer sets only models.observer.thinking", () => {
@@ -39,5 +43,41 @@ describe("mergeSettingsConfig (global layer then project layer)", () => {
 		expect(merged.serialWorkers).toBe(true);
 		expect(merged.passive).toBe(false);
 		expect(merged.chunkTokens).toBe(999);
+	});
+});
+
+describe("Runtime.ensureConfig per-cwd cache (P0.2)", () => {
+	function projectDir(chunkTokens: number): string {
+		const dir = mkdtempSync(join(tmpdir(), "om-p02-"));
+		mkdirSync(join(dir, ".pi"), { recursive: true });
+		writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ "observational-memory": { chunkTokens } }));
+		return dir;
+	}
+
+	it("reloads settings when the session cwd changes (two projects, one process)", () => {
+		const dirA = projectDir(1111);
+		const dirB = projectDir(2222);
+		const runtime = new Runtime();
+		try {
+			runtime.ensureConfig(dirA);
+			expect(runtime.config.chunkTokens).toBe(1111);
+			expect(runtime.configCwd).toBe(dirA);
+
+			// Second session starts in another project → its settings win, not the cached ones.
+			runtime.ensureConfig(dirB);
+			expect(runtime.config.chunkTokens).toBe(2222);
+			expect(runtime.configCwd).toBe(dirB);
+
+			// Same cwd again → still cached (single load per distinct cwd).
+			runtime.ensureConfig(dirB);
+			expect(runtime.config.chunkTokens).toBe(2222);
+
+			// Back to the first project → reloads again.
+			runtime.ensureConfig(dirA);
+			expect(runtime.config.chunkTokens).toBe(1111);
+		} finally {
+			rmSync(dirA, { recursive: true, force: true });
+			rmSync(dirB, { recursive: true, force: true });
+		}
 	});
 });

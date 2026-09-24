@@ -9,6 +9,17 @@ import { StatusController } from "./ui/status-controller.js";
 export class Runtime {
 	config: Config = { ...DEFAULTS };
 	configLoaded = false;
+	/** The cwd `config` was loaded from (P0.2) — reloaded when a session in another project starts. */
+	configCwd = "";
+
+	/**
+	 * Session generation counter (P0.1 stale-session commit race). Incremented on every
+	 * session_start; async worker-completion paths capture the generation at dispatch and
+	 * discard their results SILENTLY when it no longer matches — a worker started for a
+	 * replaced session must never append entries (observations/cost), toast, or pump the
+	 * queue of the session that replaced it.
+	 */
+	generation = 0;
 
 	/** The per-session on/off gate (default OFF). Outermost guard in every handler. */
 	enabled = false;
@@ -73,6 +84,15 @@ export class Runtime {
 	lastWorkerError: string | undefined;
 
 	/**
+	 * Consecutive worker (observer OR consolidator) failures without an intervening success
+	 * (P0.4 circuit breaker). At CIRCUIT_BREAKER_THRESHOLD the pipeline pauses so a broken
+	 * provider/model cannot keep burning money every turn; cleared by any success or `/om on`.
+	 */
+	workerFailureStreak = 0;
+	/** When true both worker triggers no-op until cleared (see `clearWorkerFailures`). */
+	pipelinePaused = false;
+
+	/**
 	 * Whether the last compaction waited for in-flight observers or skipped the wait (fast path:
 	 * no in-flight observer could affect the rendered block). Surfaced by /om:status.
 	 */
@@ -122,9 +142,15 @@ export class Runtime {
 		this.pendingInfoToastLines = [];
 	}
 
+	/**
+	 * Load (or re-load) the layered settings for THIS session's cwd. Cached per cwd: pi can
+	 * host sessions from different projects in one process, and a one-shot cache would keep
+	 * the first project's `.pi/settings.json` overrides applied to all of them (P0.2).
+	 */
 	ensureConfig(cwd: string): void {
-		if (this.configLoaded) return;
+		if (this.configLoaded && this.configCwd === cwd) return;
 		this.config = loadConfig(cwd);
+		this.configCwd = cwd;
 		this.configLoaded = true;
 	}
 

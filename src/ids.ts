@@ -1,4 +1,5 @@
 import { estimateStringTokens } from "./tokens.js";
+import { redactSecrets } from "./redact.js";
 import type { Observation } from "./ledger/types.js";
 
 /** What the observer model emits: minute-resolution event time + single-line content. */
@@ -58,7 +59,10 @@ export function assignObservationTimestamps(
 	const result: Observation[] = [];
 
 	for (const model of modelObservations) {
-		const content = model.content;
+		// P0.10 egress point #2: observation content is committed to the ledger (and later
+		// written verbatim into .memory/*.md), so secrets are stripped here — after the model's
+		// wording is final, before tokenCount is computed so the count matches what persists.
+		const content = redactSecrets(model.content);
 		const base = modelTimestampToBase(model.timestamp) ?? fallbackBase;
 
 		let timestamp = base;

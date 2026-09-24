@@ -17,9 +17,9 @@ import { registerSwitchingCommands } from "./commands/switching.js";
 import { registerCompactionHook } from "./hooks/compaction-hook.js";
 import { registerCompactionTrigger } from "./hooks/compaction-trigger.js";
 import { registerConsolidatorTrigger } from "./hooks/consolidator-trigger.js";
-import { registerObserverTrigger } from "./hooks/observer-trigger.js";
+import { clearWorkerFailures, registerObserverTrigger } from "./hooks/observer-trigger.js";
 import { OM_ENABLED, type Entry } from "./ledger/index.js";
-import { ensureSessionMemory } from "./memory/session.js";
+import { collectRuns, ensureSessionMemory } from "./memory/session.js";
 import { Runtime } from "./runtime.js";
 
 function readGateFromLedger(branch: Entry[]): boolean {
@@ -43,12 +43,30 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 		}
 	}
 
+	/**
+	 * P0.7 — resolve this session's memory root AND GC stale `.runs/` IPC files. GC is wrapped
+	 * so that a filesystem hiccup can never prevent the memory root from resolving (which would
+	 * otherwise disable the whole pipeline).
+	 */
+	function collectRunsGuarded(ctx: any): string {
+		const root = ensureSessionMemory(ctx);
+		try {
+			collectRuns(root);
+		} catch {
+			// GC is best-effort; never block session start.
+		}
+		return root;
+	}
+
 	pi.on("session_start", (_event: unknown, ctx: any) => {
+		// P0.1: invalidate every worker dispatched for the previous session. Any completion
+		// path that captured an older generation discards its result silently.
+		runtime.generation += 1;
 		runtime.ensureConfig(ctx.cwd);
 		runtime.dispatchedCoversUpToId = undefined;
 		const branch = ctx.sessionManager.getBranch() as Entry[];
 		runtime.enabled = readGateFromLedger(branch);
-		if (runtime.enabled) runtime.memoryRoot = ensureSessionMemory(ctx);
+		if (runtime.enabled) runtime.memoryRoot = collectRunsGuarded(ctx);
 		attachIfEnabled(ctx);
 		runtime.refreshFooterGauges(branch, ctx.getContextUsage?.()?.tokens ?? null);
 		runtime.refreshCost(ctx.sessionManager.getEntries() as Entry[]);
@@ -71,7 +89,8 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 			runtime.enabled = next;
 			pi.appendEntry(OM_ENABLED, { enabled: next });
 			if (next) {
-				runtime.memoryRoot = ensureSessionMemory(ctx);
+				clearWorkerFailures(runtime); // P0.4: `/om off`→`on` is the manual circuit-breaker reset
+				runtime.memoryRoot = collectRunsGuarded(ctx); // P0.7: same GC path as session_start
 				attachIfEnabled(ctx);
 				runtime.refreshFooterGauges(ctx.sessionManager.getBranch() as Entry[], ctx.getContextUsage?.()?.tokens ?? null);
 				runtime.refreshCost(ctx.sessionManager.getEntries() as Entry[]);

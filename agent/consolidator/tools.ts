@@ -13,7 +13,7 @@ import { join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Static } from "typebox";
-import { atomicWrite } from "../../src/memory/paths.js";
+import { atomicWrite, resolveWithinMemory } from "../../src/memory/paths.js";
 
 type ToolText = { content: { type: "text"; text: string }[]; details: unknown };
 
@@ -27,16 +27,9 @@ function fail(text: string): ToolText {
 
 /** Resolve a requested path against the sandbox root, or return undefined if it escapes. */
 function scoped(root: string, requested: string): string | undefined {
-	// The sandbox root IS the .memory dir, but the model may naturally pass a
-	// project-relative ".memory/x.md" path. Strip that prefix so the file lands at the root:
-	// a nested root/.memory/x.md would be invisible to listTopics/readJourney (observed
-	// incident — 9 archived files hidden from the memory map).
-	const normalized = requested.replace(/^(?:\.\/)?\.memory(?:\/+|$)/, "");
-	const abs = resolve(root, normalized === "" ? "." : normalized);
-	const rel = relative(root, abs);
-	if (rel === "") return abs;
-	if (rel.startsWith("..")) return undefined;
-	return abs;
+	// P0.3: single implementation — resolveWithinMemory owns the ".memory/" prefix strip
+	// and the escape checks; this wrapper only supplies the root.
+	return resolveWithinMemory(root, requested);
 }
 
 const ReadSchema = Type.Object({

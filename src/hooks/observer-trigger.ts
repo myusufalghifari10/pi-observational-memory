@@ -33,9 +33,47 @@ type TriggerCtx = {
 
 let runCounter = 0;
 
+/** Circuit-breaker threshold: consecutive worker failures that pause the pipeline (P0.4). */
+export const CIRCUIT_BREAKER_THRESHOLD = 3;
+
+/**
+ * Count one worker failure (P0.4). At the threshold the pipeline pauses — each trigger
+ * stops dispatching — and a single error toast announces it (further failures stay silent).
+ */
+export function noteWorkerFailure(
+	runtime: Runtime,
+	notify?: (message: string, level: "info" | "warning" | "error") => void,
+): void {
+	runtime.workerFailureStreak += 1;
+	if (runtime.workerFailureStreak >= CIRCUIT_BREAKER_THRESHOLD && !runtime.pipelinePaused) {
+		runtime.pipelinePaused = true;
+		notify?.(`om: pipeline paused (${runtime.workerFailureStreak} consecutive worker failures)`, "error");
+	}
+}
+
+/**
+ * Clear the failure streak and unpause the pipeline (P0.4): called on ANY worker success
+ * (recovery proved) and on `/om off`→`on` (manual recovery).
+ */
+export function clearWorkerFailures(runtime: Runtime): void {
+	runtime.workerFailureStreak = 0;
+	runtime.pipelinePaused = false;
+}
+
+/**
+ * True while the async completion path still belongs to the session that dispatched it:
+ * same generation AND the gate is still on. Used before every `pi.appendEntry`, status/toast,
+ * retry-bookkeeping, and pump dispatch (P0.1).
+ */
+export function isCurrentSession(runtime: Runtime, gen: number): boolean {
+	return runtime.generation === gen && runtime.enabled;
+}
+
 /**
  * Record a finished worker's cost from pi's built-in metrics (best-effort, even on failure).
  * Appended as an om.cost ledger entry; summed across the whole session so it never rolls back.
+ * Gated on the dispatch-time session generation (P0.1): a stale worker's spend must never
+ * land in the replacing session's ledger.
  */
 export function recordWorkerCost(
 	pi: ExtensionAPI,
@@ -43,7 +81,9 @@ export function recordWorkerCost(
 	ctx: { sessionManager: { getEntries: () => Entry[] } },
 	role: "observer" | "consolidator",
 	runId: string,
+	gen: number,
 ): void {
+	if (!isCurrentSession(runtime, gen)) return;
 	const cost = readWorkerCost(runCostPath(runtime.memoryRoot, runId));
 	if (!cost) return;
 	pi.appendEntry(OM_COST, { costUsd: cost.costUsd, role, runId });
@@ -142,10 +182,13 @@ export function takeRetrySlice(
  */
 export function pumpWorkerQueue(pi: ExtensionAPI, runtime: Runtime, ctx: TriggerCtx): void {
 	if (runtime.pumpQueued) return;
+	// P0.1: bind the pump to the session that queued it. If the session was replaced in the
+	// async gap, the captured ctx is stale — skip instead of dispatching with it.
+	const gen = runtime.generation;
 	runtime.pumpQueued = true;
 	queueMicrotask(() => {
 		runtime.pumpQueued = false;
-		if (!runtime.enabled || runtime.config.passive) return;
+		if (runtime.generation !== gen || !runtime.enabled || runtime.config.passive) return;
 		// The captured ctx can go stale across this async gap (session replacement or reload
 		// in between), and pi's ctx accessors throw on a stale ctx. A pump is opportunistic —
 		// never let it kill the process; the next turn_end/agent_start re-evaluates anyway.
@@ -166,6 +209,8 @@ export function pumpWorkerQueue(pi: ExtensionAPI, runtime: Runtime, ctx: Trigger
  */
 export function evaluateObserverTriggers(pi: ExtensionAPI, runtime: Runtime, ctx: TriggerCtx): void {
 	if (!runtime.enabled || runtime.config.passive) return;
+	// P0.4: circuit breaker — a paused pipeline never dispatches (no retries, no new chunks).
+	if (runtime.pipelinePaused) return;
 
 	const hasUI = ctx.hasUI;
 	const ui = ctx.ui;
@@ -282,6 +327,9 @@ async function dispatchObserver(
 	slice: SourceSlice,
 	afterEntryId: string | undefined,
 ): Promise<void> {
+	// P0.1: capture the session generation at dispatch — every commit-side effect below is
+	// gated on it, so a session replacement mid-flight discards this worker's result.
+	const gen = runtime.generation;
 	const runId = nextRunId();
 	const controller = new AbortController();
 	const coversUpToId = slice.coversUpToId!;
@@ -313,8 +361,14 @@ async function dispatchObserver(
 		});
 		const env = buildWorkerEnv("observer", { memoryRoot: runtime.memoryRoot, runId });
 		const exit = await spawnWorker({ argv, cwd: runtime.memoryRoot, env, signal: controller.signal });
+		// P0.1: the session may have been replaced while the worker ran. Discard silently —
+		// no cost append, no observations, no toasts, no retry bookkeeping (no retry, no error).
+		if (!isCurrentSession(runtime, gen)) {
+			logIfEnabled(runtime.config.debugLog, "observer.stale-discard", { exitCode: exit.code }, runId);
+			return;
+		}
 		// Capture cost before the exit-code check so a partial run's spend is still recorded.
-		recordWorkerCost(pi, runtime, ctx, "observer", runId);
+		recordWorkerCost(pi, runtime, ctx, "observer", runId, gen);
 		if (exit.code !== 0) {
 			throw new Error(`observer exited with code ${exit.code}${exit.stderr ? `: ${exit.stderr.trim().slice(0, 200)}` : ""}`);
 		}
@@ -332,6 +386,7 @@ async function dispatchObserver(
 		}
 		runtime.status.workerDone(runId, observations.length);
 		clearSliceFailure(runtime, coversUpToId);
+		clearWorkerFailures(runtime); // P0.4: any success proves recovery
 		logIfEnabled(runtime.config.debugLog, "observer.settle", { outcome: "ok", exitCode: exit.code, observations: observations.length }, runId);
 		runtime.refreshFooterGauges(ctx.sessionManager.getBranch(), ctx.getContextUsage?.()?.tokens ?? null);
 		if (ctx.hasUI && ctx.ui) {
@@ -345,8 +400,14 @@ async function dispatchObserver(
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		// P0.1: stale session — discard without retry, lastWorkerError, status, or toast.
+		if (!isCurrentSession(runtime, gen)) {
+			logIfEnabled(runtime.config.debugLog, "observer.stale-discard", { error: message }, runId);
+			return;
+		}
 		runtime.lastWorkerError = message;
 		recordSliceFailure(runtime, afterEntryId, coversUpToId);
+		noteWorkerFailure(runtime, ctx.hasUI && ctx.ui ? (m, l) => ctx.ui!.notify(m, l) : undefined); // P0.4
 		logIfEnabled(runtime.config.debugLog, "observer.settle", { outcome: "error", error: message }, runId);
 		runtime.status.workerError(runId);
 		// Errors bypass the coalescer: they use a different display level and
@@ -354,7 +415,8 @@ async function dispatchObserver(
 		if (ctx.hasUI) ctx.ui?.notify(`om: observer failed: ${message}`, "error");
 	} finally {
 		runtime.observersInFlight.delete(runId);
-		pumpWorkerQueue(pi, runtime, ctx);
+		// P0.1: never re-drive the queue from a completion that no longer belongs to this session.
+		if (isCurrentSession(runtime, gen)) pumpWorkerQueue(pi, runtime, ctx);
 	}
 }
 

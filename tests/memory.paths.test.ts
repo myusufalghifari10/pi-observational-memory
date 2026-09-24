@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { renderIndexFile, renderMemoryMap } from "../src/memory/index-render.js";
 import { atomicWrite, listTopics, parseFrontMatter, readJourney, resolveWithinMemory } from "../src/memory/paths.js";
@@ -25,12 +25,26 @@ function writeTopic(filename: string, content: string): void {
 describe("resolveWithinMemory", () => {
 	it("resolves paths inside .memory/", () => {
 		expect(resolveWithinMemory(root, "auth.md")).toBe(join(root, "auth.md"));
-		expect(resolveWithinMemory(root, ".memory/auth.md")).toBe(join(root, ".memory", "auth.md"));
+	});
+
+	it("strips the project-relative .memory/ prefix so files land at the sandbox root (P0.3)", () => {
+		expect(resolveWithinMemory(root, ".memory/auth.md")).toBe(join(root, "auth.md"));
+		expect(resolveWithinMemory(root, "./.memory/auth.md")).toBe(join(root, "auth.md"));
+		// The bare root itself is allowed.
+		expect(resolveWithinMemory(root, ".memory")).toBe(resolve(root));
+		expect(resolveWithinMemory(root, "")).toBe(resolve(root));
 	});
 
 	it("rejects paths that escape the sandbox", () => {
 		expect(resolveWithinMemory(root, "../secret.txt")).toBeUndefined();
 		expect(resolveWithinMemory(root, "../../etc/passwd")).toBeUndefined();
+		expect(resolveWithinMemory(root, "x/../../y.md")).toBeUndefined(); // nested escape
+		expect(resolveWithinMemory(root, "/etc/passwd")).toBeUndefined(); // absolute outside
+	});
+
+	it("accepts dot-prefixed filenames that do NOT escape (no false reject)", () => {
+		expect(resolveWithinMemory(root, "..backup.md")).toBe(join(root, "..backup.md"));
+		expect(resolveWithinMemory(root, ".hidden.md")).toBe(join(root, ".hidden.md"));
 	});
 });
 
@@ -52,6 +66,32 @@ describe("parseFrontMatter", () => {
 		const { front, body } = parseFrontMatter("no front matter");
 		expect(front).toEqual({});
 		expect(body).toBe("no front matter");
+	});
+
+	// P0.5 — an LLM must not be able to silently disable anergy by writing a YAML list.
+	it("P0.5: parses the single-line comma list for asserts", () => {
+		const { front } = parseFrontMatter("---\nasserts: src/a.ts, src/b.ts#handle, \"docs/c.md\"\n---\nx");
+		expect(front.asserts).toEqual(["src/a.ts", "src/b.ts#handle", "docs/c.md"]);
+	});
+
+	it("P0.5: parses an inline YAML flow sequence for asserts", () => {
+		const { front } = parseFrontMatter("---\nasserts: [src/auth.ts, src/login.ts#handleLogin]\n---\nx");
+		expect(front.asserts).toEqual(["src/auth.ts", "src/login.ts#handleLogin"]);
+	});
+
+	it("P0.5: parses a YAML block list for asserts (and keeps later keys readable)", () => {
+		const { front, body } = parseFrontMatter(
+			"---\nid: auth\nasserts:\n  - src/auth.ts\n  - \"src/session.ts\"\n  - src/middleware.ts#requireAuth\ntitle: Auth\n---\nBody",
+		);
+		expect(front.asserts).toEqual(["src/auth.ts", "src/session.ts", "src/middleware.ts#requireAuth"]);
+		expect(front.id).toBe("auth");
+		expect(front.title).toBe("Auth"); // the block list must not swallow later keys
+		expect(body).toBe("Body");
+	});
+
+	it("P0.5: empty asserts value stays exempt (no assertion recorded)", () => {
+		const { front } = parseFrontMatter("---\nasserts: \"\"\n---\nx");
+		expect(front.asserts).toBeUndefined();
 	});
 });
 

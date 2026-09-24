@@ -11,7 +11,7 @@
  * All writes are atomic (temp + rename) so a reader never sees a half-written file.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 export const INDEX_FILENAME = "INDEX.md";
 /**
@@ -68,13 +68,23 @@ export function atomicWrite(path: string, content: string): void {
  * Resolve a (possibly relative) path and confirm it stays inside `.memory/`. Returns the
  * absolute path, or undefined if it escapes the sandbox. The consolidator's scoped tools use
  * this to reject any path outside `.memory/` (design risk 6).
+ *
+ * This is the SINGLE sandbox implementation (P0.3): the consolidator's `scoped()` delegates
+ * here instead of keeping a second copy of the rules.
  */
 export function resolveWithinMemory(root: string, requestedPath: string): string | undefined {
 	const base = resolve(root);
-	const abs = resolve(base, requestedPath);
+	// The model may naturally pass a project-relative ".memory/x.md" path. Strip that prefix
+	// so the file lands at the sandbox root — a nested root/.memory/x.md would be invisible
+	// to listTopics/readJourney (observed incident — 9 archived files hidden from the map).
+	const normalized = requestedPath.replace(/^(?:\.\/)?\.memory(?:\/+|$)/, "");
+	const abs = resolve(base, normalized === "" ? "." : normalized);
 	const rel = relative(base, abs);
 	if (rel === "" || rel === ".") return abs; // the session memory root itself
-	if (rel.startsWith("..") || resolve(base, rel) !== abs) return undefined;
+	// Escape check by FIRST relative segment only: rel.startsWith("..") would falsely reject
+	// legitimate names like "..backup.md", while ".." / "../x" / "x/../../y" all resolve to
+	// a first segment of ".." and are rejected. The normalization check backstops both.
+	if (rel.split(sep)[0] === ".." || resolve(base, rel) !== abs) return undefined;
 	return abs;
 }
 
@@ -106,11 +116,40 @@ const FRONT_MATTER_RE = /^---\n([\s\S]*?)\n---\n?/;
  * `key: value` fields the consolidator authors (id, title, summary, updated). Returns the
  * parsed fields plus the body after the front-matter block.
  */
+/** Strip one layer of matching single/double quotes around an `asserts` entry. */
+function unquoteEntry(entry: string): string {
+	const t = entry.trim();
+	if (
+		t.length >= 2 &&
+		((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))
+	) {
+		return t.slice(1, -1);
+	}
+	return t;
+}
+
+/**
+ * Parse an inline `asserts` value: handles the bare comma list (`a, b`) AND the YAML flow
+ * sequence (`[a, b]`). Returns raw (still-quoted) entries, trimmed and empties dropped.
+ */
+function splitInlineAsserts(value: string): string[] {
+	let raw = value.trim();
+	if (raw.startsWith("[") && raw.endsWith("]")) raw = raw.slice(1, -1);
+	return raw
+		.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0);
+}
+
 export function parseFrontMatter(content: string): { front: TopicFrontMatter; body: string } {
 	const match = FRONT_MATTER_RE.exec(content);
 	if (!match) return { front: {}, body: content };
 	const front: TopicFrontMatter = {};
-	for (const line of match[1].split("\n")) {
+	const lines = match[1].split("\n");
+	// Index loop (not `for..of`): an `asserts:` block list consumes its own `- item` lines
+	// by advancing `i`, so those never get re-interpreted as `key: value` rows.
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
 		const idx = line.indexOf(":");
 		if (idx < 0) continue;
 		const key = line.slice(0, idx).trim();
@@ -123,20 +162,32 @@ export function parseFrontMatter(content: string): { front: TopicFrontMatter; bo
 		}
 		if (key === "id" || key === "title" || key === "summary" || key === "updated") {
 			front[key] = value;
-		} else if (key === "asserts") {
-			// Comma-separated single line: `asserts: src/a.ts, src/b.ts#handle, "docs/c.md"`.
-			const list = value
-				.split(",")
-				.map((entry) => entry.trim())
-				.map((entry) =>
-					(entry.startsWith('"') && entry.endsWith('"') && entry.length >= 2) ||
-					(entry.startsWith("'") && entry.endsWith("'") && entry.length >= 2)
-						? entry.slice(1, -1)
-						: entry,
-				)
-				.filter((entry) => entry.length > 0);
-			if (list.length > 0) front.asserts = list;
+			continue;
 		}
+		if (key !== "asserts") continue;
+
+		const entries: string[] = [];
+		if (value === "") {
+			// P0.5 YAML block list:
+			//   asserts:
+			//     - src/a.ts
+			//     - src/b.ts#handle
+			while (i + 1 < lines.length && lines[i + 1].trim().startsWith("-")) {
+				const item = lines[i + 1].trim().slice(1).trim();
+				if (item.length > 0) entries.push(item);
+				i++;
+			}
+		} else {
+			// P0.5: single-line comma list (`a, b`) or inline YAML flow (`[a, b]`).
+			entries.push(...splitInlineAsserts(value));
+		}
+
+		const list: string[] = [];
+		for (const entry of entries) {
+			const unquoted = unquoteEntry(entry);
+			if (unquoted.length > 0 && !list.includes(unquoted)) list.push(unquoted);
+		}
+		if (list.length > 0) front.asserts = list;
 	}
 	return { front, body: content.slice(match[0].length) };
 }
