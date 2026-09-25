@@ -1,10 +1,24 @@
 # pi-observational-memory
 
-> **Long-running Pi sessions that remember — tiered, subprocess-backed memory with parallel observers, durable markdown files, and a memory that knows when it's gone stale.**
+> **Long-running Pi sessions that remember — and stay *executable* after compaction: tiered, subprocess-backed memory with parallel observers, durable markdown files, and trust-weighted lossless rehydration.**
 
 *Built for [pi](https://pi.dev) — an agent extension that distills your conversation into observations, files them into `.memory/` topic files, and renders them back deterministically every time your context compacts. Local-model friendly: flip one switch to run every worker serially. Optionally indexes your memory into [pi-second-brain](https://github.com/myusufalghifari10/pi-second-brain) so old context becomes queryable.*
 
-> **Provenance.** Based on [amosblomqvist/pi-observational-memory](https://github.com/amosblomqvist/pi-observational-memory) (MIT — © 2026 Amos Blomqvist), whose code comments describe it as a trimmed adaptation of "OM V3". The wider concept traces back to [Mastra](https://mastra.ai)'s *Observational Memory* research, and the canonical popular implementation is [elpapi42/pi-observational-memory](https://github.com/elpapi42/pi-observational-memory). This repo keeps the original license, credits both, and adds its own layer of fixes and features (see below). Comparison table and lineage at the bottom — verified against each project's source code.
+> **Provenance.** Based on [amosblomqvist/pi-observational-memory](https://github.com/amosblomqvist/pi-observational-memory) (MIT — © 2026 Amos Blomqvist), whose code comments describe it as a trimmed adaptation of "OM V3". The wider concept traces back to [Mastra](https://mastra.ai)'s *Observational Memory* research, and the canonical popular implementation is [elpapi42/pi-observational-memory](https://github.com/elpapi42/pi-observational-memory). This repo keeps the original license, credits both, and adds a **full v4 rebuild — trust-weighted lossless rehydration** (see below). Comparison table and lineage at the bottom — verified against each project's source code.
+
+## Built for long-horizon agents
+
+Big context windows did not fix long-horizon execution. What breaks first is never recall — it is *execution*: the agent forgets the constraint stated in hour one, redoes work it already finished, retries the approach it already rejected, and loses the open loop that was the whole point of the session. The usual failure is compaction itself: a living context becomes a summary of a summary, and every round trip loses state you never get back.
+
+OM v4 is built around what long-horizon work actually demands from a context:
+
+1. **State, not story.** Every compaction leads with a forward-looking `## State` (Goal / Constraints / Plan / Done / Blocked / Next / Open loops) and ends with **Open loops** as the very last heading. The slots that keep a multi-hour task executable sit at the top and at the recency anchor — in the same place every time.
+2. **Nothing disappears silently.** The cutoff is flush-acked — an unobserved chunk can never be evicted; failed ranges surface as `⚠ UNOBSERVED WINDOW` markers; corrections render as adjacent `believed: X` → `now: Y` pairs instead of overwriting the past. If memory has a hole, the block *says so*.
+3. **Negative space and procedure, not just facts.** `DEATHS.md` records `rejected: <approach> because <reason>` (with a standing instruction to grep it before trying anything new), and `strats/` holds proven routines at one line each. Knowing what *not* to try again is half of finishing a long task.
+4. **Triage under budget, not truncation.** When memory outgrows the render budget, lines pack by a deterministic trust score (user-asserted > model-distilled > tool-derived; fresh > stale) instead of being cut at the tail.
+5. **Determinism you can test.** The whole rehydration path is model-free: same durable state ⇒ byte-identical block — proven by golden tests and by rehydration probes over three fixture sessions (state present, every Done item present, open loops anchored last, corrections adjacent, gaps marked, constraints first). Crash recovery is literally the same code path.
+
+The result: after any number of compactions, the parent rehydrates a context that is **executable** — goal, constraints, plan, status, dead ends, and fresh facts in a fixed, budget-aware layout. The rest of this README is the technical tour.
 
 ## Why
 
@@ -73,7 +87,7 @@ The rendered block, in order: instructions & context policy → `## State (as of
 
 - **Parallel *or* serial workers.** Observers fan out (default concurrency 4) on cloud models; `/om-sequential` switches the whole pipeline to one worker at a time for local models — applied live, persisted to settings.
 - **Model-free compaction.** The render path is pure code: deterministic, instant, failure-proof; empty memory delegates to Pi's native summarizer.
-- **Context bridging.** Observers see a bounded tail of previous observations, so they stop restating facts and can spot contradictions across chunks.
+- **Context bridging.** Observers see the 8 most recent observations (full content, read-only) before their chunk, so they stop restating facts and can spot contradictions across chunks.
 - **Anergy — stale-memory detection.** Topic files carry `asserts:` paths checked against your live repo at render time; topics whose assertions no longer hold (and that no current observation re-mentions) are demoted to one-line stubs instead of misleading you.
 - **Failed chunks retry once, bounded.** A crashed observer no longer permanently loses its chunk: failures are recorded and re-dispatched oldest-first, capped so a poison chunk can never loop forever — and a give-up leaves an `attempts: 2` gap entry that renders as `⚠ UNOBSERVED WINDOW`, so a hole can never be *silent*.
 - **STATE.md — anti-forgetting.** The consolidator keeps a forward-looking `## Goal / Constraints / Plan / Done / Blocked / Next / Open loops` file; the block shows it verbatim and repeats **Open loops** at the very end, the slot long-horizon tasks actually read.
@@ -111,7 +125,7 @@ The rendered block, in order: instructions & context policy → `## State (as of
 | | **this repo** | [elpapi42](https://github.com/elpapi42/pi-observational-memory) | [amosblomqvist](https://github.com/amosblomqvist/pi-observational-memory) | [casret](https://github.com/casret/pi-observational-memory) | [nik1t7n](https://github.com/nik1t7n/pi-observational-memory-extension) |
 |---|---|---|---|---|---|
 | Created | 2026-09 (this fork) | 2026-04 | 2026-06 | 2026-08 (fork) | 2026-06 |
-| Relationship | git fork of amosblomqvist + 11 feature/fix commits | the canonical implementation (v3.1.4, ~650★) | trimmed adaptation of OM V3; **upstream base of this fork** | git fork of amosblomqvist used as a branch lab | independent, Mastra-style |
+| Relationship | git fork of amosblomqvist + **v4 rebuild** (P0–P5, 368 tests) | the canonical implementation (v3.1.4, ~650★) | trimmed adaptation of OM V3; **upstream base of this fork** | git fork of amosblomqvist used as a branch lab | independent, Mastra-style |
 | Roles | observer, consolidator | Observer, Reflector, Dropper | observer, consolidator | same as amos | Actor, Observer, Reflector |
 | Workers | subprocess `pi` sessions, parallel **or** serial | in-process agents, always serial | subprocess, parallel (4) | subprocess, parallel (4) | in-process LLM calls |
 | Storage | ledger + `.memory/*.md` topic files | session ledger only | ledger + `.memory/*.md` | ledger + `.memory/*.md` | JSON state files (`.pi/om/`) |
@@ -133,6 +147,18 @@ The rendered block, in order: instructions & context policy → `## State (as of
 | Branch-local ledger, native `/tree` rollback | ✓ | ◐³ | ✓ | ✓ | ✗ |
 | Cross-session fork/parent memory seeding | ✓ | ✗ | ✓ | ✓ | ✗ |
 | Project-shared memory scope | ✗ | ✗ | ✗ | ✗ | ✓ |
+| **v4 — trust-weighted lossless rehydration (2026-09-25 rebuild)** ||||||
+| Trust-scored knapsack packing under render budget | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Corrections kept adjacent (`believed:` → `now:`, chains included) | ✓ | ✗⁹ | ✗ | ✗ | ✗ |
+| Flush-ack cutoff gate (never evict an unobserved chunk) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Gap markers — `⚠ UNOBSERVED WINDOW` (no silent holes) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `STATE.md` task state + Open-loops recency anchor | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Negative memory (`DEATHS.md`) + pre-approach guard + revocable verdicts | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Procedural memory (`strats/` + `/strat`) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| JIT *Relevant memory* section at render time | ✓ | ◐¹⁰ | ✗ | ✗ | ◐¹⁰ |
+| Restart rehydration — same durable state ⇒ byte-identical block | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Circuit breaker (3 consecutive worker failures ⇒ pipeline pause) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Render-audit telemetry (packed/evicted, gaps, deaths, supersessions) | ✓ | ✗ | ✗ | ✗ | ✗ |
 | **Workers & pipeline** ||||||
 | Subprocess workers (each an inspectable pi session) | ✓ | ✗ | ✓ | ✓ | ✗ |
 | Parallel observers (concurrency configurable) | ✓ | ✗ | ✓ | ✓ | ✗ |
@@ -162,9 +188,9 @@ The rendered block, in order: instructions & context policy → `## State (as of
 | Zero runtime dependencies | ✓ | ✓ | ✓ | ✓ | ✓ |
 | End-user install instructions | ✓ | ✓ | ✗ | ✗ | ✗ |
 
-¹ elpapi42 has an in-session projection (`om.folded`), no standalone file. ² The compaction *render* is pure, but the same hook runs LLM observer/reflector passes first. ³ Branch-local folding exists; no dedicated `/tree` rollback test path. ⁴ Always serial by design — no config knob. ⁵ Stage clocks re-anchor across compaction; no explicit resume message. ⁶ Bridged to the *consolidator*, not the observer. ⁷ Pool-aware threshold, not context-window-aware. ⁸ NDJSON logger exists but has **zero call sites** — the documented `debugLog` flag can never turn it on.
+¹ elpapi42 has an in-session projection (`om.folded`), no standalone file. ² The compaction *render* is pure, but the same hook runs LLM observer/reflector passes first. ³ Branch-local folding exists; no dedicated `/tree` rollback test path. ⁴ Always serial by design — no config knob. ⁵ Stage clocks re-anchor across compaction; no explicit resume message. ⁶ Bridged to the *consolidator*, not the observer. ⁷ Pool-aware threshold, not context-window-aware. ⁸ NDJSON logger exists but has **zero call sites** — the documented `debugLog` flag can never turn it on. ⁹ elpapi42's Dropper tier *deletes* judged-irrelevant facts — the opposite invariant. ¹⁰ Recall exists as a tool (`recall` / `om_recall`) the model must think to call; nothing is injected at compaction time.
 
-*Verified by source inspection of each repo's default branch on 2026-09-23. casret's interesting work lives on 8 stacked, unmerged branches (`fix-e2big-prompt-file`, `adaptive-context-compaction`, `friendly-name-memory-index`, `om-handoff-integration`, …) — cells marked ◐ reflect that; its `main` is byte-identical to amosblomqvist's `78a1efc`. Stars and dates from GitHub/npm as of Sep 2026.*
+*Verified by source inspection of each repo's default branch on 2026-09-23. The **v4** rows were added 2026-09-25: this-repo cells are backed by the test suite (368 tests — golden byte-identity, rehydration probes, gap/flush-ack regressions); competitor cells rest on the same source inspection — open an issue if a project has since grown one of these. casret's interesting work lives on 8 stacked, unmerged branches (`fix-e2big-prompt-file`, `adaptive-context-compaction`, `friendly-name-memory-index`, `om-handoff-integration`, …) — cells marked ◐ reflect that; its `main` is byte-identical to amosblomqvist's `78a1efc`. Stars and dates from GitHub/npm as of Sep 2026.*
 
 ### Lineage — who came from what
 
@@ -226,7 +252,7 @@ All settings live under the `observational-memory` key — global `~/.pi/agent/s
 
 ```bash
 npm install
-npm test              # vitest — 34 test files, 359 tests (P0–P5.2)
+npm test              # vitest — 34 test files, 368 tests (P0–P5, v4 probes)
 npm run typecheck     # tsc --noEmit
 sh scripts/install.sh --test --no-register   # everything, without touching settings
 ```
