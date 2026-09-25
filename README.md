@@ -33,18 +33,41 @@ Observational memory takes the third path: **observe in the background, store du
         │                                   │ files/discard judgment
         │                                   ▼
         │                     .memory/<session>/*.md + INDEX.md + JOURNEY.md
+        │                     + STATE.md + DEATHS.md + strats/*.md
         │                                   (atomic temp+rename writes)
         ▼
-  at context ≥ 150k: compaction hook snaps the cutoff to a chunk boundary and
-  renders  [ instructions | JOURNEY | memory map | observations ]  — model-free —
-  then keeps the verbatim tail.  Stale topics are demoted (anergy), not trusted.
+  at context ≥ 64k: the flush-ack gate snaps the cutoff to an OBSERVED chunk
+  boundary (compaction can never evict an unflushed chunk), then renders
+  [ instructions | State | Journey | Memory map | Relevant memory |
+    Observations | Strats | Open loops ] + ⚠ UNOBSERVED WINDOW markers —
+  model-free — then keeps the verbatim tail.  Stale topics are demoted
+  (anergy), not trusted.
 ```
 
 **Three tiers, three lifetimes:**
 
 1. **Raw** — the session ledger itself. Branch-local, so `/tree` rolls short-term memory back natively; spend is summed across all branches so money never lies.
-2. **Observations** — structured `{timestamp, content, tokenCount}` records promoted from chunks by the observers, kept in a bounded buffer with promotion thresholds.
-3. **Durable** — `.memory/<sessionId>/*.md` topic files, `INDEX.md`, `JOURNEY.md`: grep-able markdown any tool can read, seeded into child sessions on fork.
+2. **Observations** — structured `{timestamp, content, tokenCount}` records promoted from chunks by the observers, kept in a bounded buffer with promotion thresholds. v4 adds a **kind** (`assertion` / `decision` / `completion` / `preference` / `event` / `question` / `rejected` / `strat` — old entries default to `event`) and a `sourceEntryId` provenance anchor.
+3. **Durable** — `.memory/<sessionId>/*.md` topic files, `INDEX.md`, `JOURNEY.md`, plus v4's `STATE.md` (forward-looking plan), `DEATHS.md` (rejected approaches) and `strats/` (procedural cues): grep-able markdown any tool can read, seeded into child sessions on fork.
+
+## v4 architecture — trust-weighted lossless rehydration
+
+The v4 thesis: **your live context is a cache projection of durable state, not a shrinking copy of the chat.** A compaction is therefore a *re-render from `.memory/` + the ledger* — the better the render, the more often compaction can run without losing the plot. Three pillars:
+
+1. **Trust-weighted packing.** Every observation carries a kind and provenance (user-asserted / model-distilled / tool-derived). Under the 18k-token render budget, lines pack greedily by a deterministic trust score (`KIND_W × PROV_W × staleness × 0.85^supersessions ÷ tokens` — `src/ledger/trust.ts`); topic/STATE lines are token-charged first, observation teasers in *Relevant memory* are line-capped at 5. If any line lacks metadata (a v1 ledger), the whole pack **falls back to chronological order, byte-identical to the pre-v4 render** — the upgrade can never regress.
+2. **Lossless rehydration.** The cutoff is gated: a chunk range is only evicted once an `om.observations.recorded` or `om.observations.gap` entry covers it (**flush-ack gate**), so compaction can never discard conversation no observer has seen. Corrections never delete: a superseded fact renders as an adjacent `believed: X` → `now: Y` pair (chains included), and the memory map's death stubs are revocable — a `(verify:)` target that vanished downgrades the verdict to `possibly-revived — re-verify`.
+3. **Negative & procedural memory.** `DEATHS.md` records *rejected: <approach> because <reason>* lines (grouped by shared cause, not by log), and the instructions block carries a standing reflex: *grep `.memory/DEATHS.md` before choosing any new implementation approach*. `strats/<name>.md` files hold one-line procedural cues (`cue` / `summary` / `command` front-matter) listed by `/strat`.
+
+The rendered block, in order: instructions & context policy → `## State (as of …)` (STATE.md verbatim; its **Open loops** section is also repeated as the block's final heading — the recency anchor) → `## Journey` → `## Memory map` (anergy flags + death stubs) → `## Relevant memory` (lexical top-5 teaser against the last instruction, omitted when empty) → `## Observations` (trust-packed, corrections adjacent) → `## Strats` → `## Open loops` → gap markers.
+
+**Gap semantics (`om.observations.gap` entries — no silent holes):**
+
+| Entry | When | In the render |
+|---|---|---|
+| `attempts: 0` | observer ran clean but extracted nothing ("acked, nothing to record") | nothing — silent ack |
+| `attempts: 2` | observer hit the retry cap and gave up on that range | `⚠ UNOBSERVED WINDOW [after..covers]` marker, counted as acked coverage |
+
+**Migration:** old ledgers work as-is — ledger types are additive (C5). v1 observations have no `kind`/`sourceEntryId`, so they fail the metadata check and force the L6 chronological fallback (output stays byte-identical to the previous release); `om.observations.gap` / `.superseded` entries only exist from now on, and `.memory/` files keep their format (STATE.md/DEATHS.md/strats are simply created when first written).
 
 ## Highlights
 
@@ -52,13 +75,21 @@ Observational memory takes the third path: **observe in the background, store du
 - **Model-free compaction.** The render path is pure code: deterministic, instant, failure-proof; empty memory delegates to Pi's native summarizer.
 - **Context bridging.** Observers see a bounded tail of previous observations, so they stop restating facts and can spot contradictions across chunks.
 - **Anergy — stale-memory detection.** Topic files carry `asserts:` paths checked against your live repo at render time; topics whose assertions no longer hold (and that no current observation re-mentions) are demoted to one-line stubs instead of misleading you.
-- **Failed chunks retry once, bounded.** A crashed observer no longer permanently loses its chunk: failures are recorded and re-dispatched oldest-first, capped so a poison chunk can never loop forever.
+- **Failed chunks retry once, bounded.** A crashed observer no longer permanently loses its chunk: failures are recorded and re-dispatched oldest-first, capped so a poison chunk can never loop forever — and a give-up leaves an `attempts: 2` gap entry that renders as `⚠ UNOBSERVED WINDOW`, so a hole can never be *silent*.
+- **STATE.md — anti-forgetting.** The consolidator keeps a forward-looking `## Goal / Constraints / Plan / Done / Blocked / Next / Open loops` file; the block shows it verbatim and repeats **Open loops** at the very end, the slot long-horizon tasks actually read.
+- **Corrections, never deletions.** A deterministic lexical detector supersedes stale facts: the block renders `believed: X` next to `now: Y` (chains flatten to the final winner), and the losing fact is never removed from the ledger.
+- **DEATHS.md — negative memory.** Rejected approaches are archived as `rejected: <approach> because <reason> (verify: …)` lines, grouped by shared cause; a failing verify downgrades the verdict to `possibly-revived — re-verify`. The instructions block tells the reader to grep it before picking any new approach.
+- **Strats — procedural memory.** One-line cues in `.memory/<sid>/strats/*.md` (`cue` / `summary` / `command`), listed by `/strat`, rendered as the `## Strats` section — a full routine costs a line of context.
+- **Flush-ack gate.** Compaction's cutoff only snaps to chunk boundaries an observer has already accounted for — it can never evict conversation that is still in flight.
+- **Trust-ordered observations.** Under budget pressure the render keeps high-trust lines (user-asserted decisions and assertions) and evicts low-trust noise first — deterministically, with a chronological byte-identical fallback for old ledgers.
+- **Secret redaction at both egress points.** Observation content and outgoing worker prompts pass through `src/redact.ts` (AWS/GitHub/OpenAI/Google/Slack keys, bearer/`token=`/`password=`-style assignments) before they touch disk.
+- **Circuit breaker.** Three consecutive worker failures pause the whole pipeline (visible in the footer and `/om:status`) instead of burning money in a loop; any success or `/om off`→`on` recovers it.
 - **Everything is inspectable.** Every worker is an ordinary recorded pi session; every file is markdown; `.runs/` IPC is plain JSON. No black boxes.
 - **Honest accounting.** Worker spend is captured from pi's own usage totals, summed monotonically across branches, shown in the footer and `/om:status`.
 - **`/tree`-correct by construction.** Ledger folds are branch-local; durable files are session-scoped; cost never rolls back.
-- **Hardened subprocess transport.** Worker argv is stripped of NUL bytes (PDF tool output used to crash dispatch), the worker pump survives session reloads, and the consolidator's tools are path-sandboxed to `.memory/`.
+- **Hardened subprocess transport.** Worker argv is stripped of NUL bytes (PDF tool output used to crash dispatch), the worker pump survives session reloads, commits are generation-gated per session, a stale extension ctx after reload/`/tree` replacement is caught and kills the pipeline gracefully instead of crashing the process, and the consolidator's tools are path-sandboxed to `.memory/`.
 - **Second-brain retrieval.** Every compaction block tells the reader that older memory is indexed in [pi-second-brain](https://github.com/myusufalghifari10/pi-second-brain) and can be queried with `knowledge_search` — retrieval lives in a real vector KB instead of a bespoke recall tool.
-- **Off by default.** Nothing runs until you type `/om on`. Workers disable themselves when their model/provider is unset, even if the gate is on.
+- **Off by default.** Nothing runs until you type `/om on`, and `passive: true` is a full kill-switch. Unset `models.*` fields simply fall back to the built-in default model.
 
 ## Commands
 
@@ -71,6 +102,7 @@ Observational memory takes the third path: **observe in the background, store du
 | `/om-parallel` | Switch to parallel observers (`serialWorkers: false`) — for cloud models |
 | `/om-sequential` | Switch to serial workers (`serialWorkers: true`) — for local models |
 | `/om-change-model` | Interactive picker: role → provider → model → thinking level, applied live |
+| `/strat` | List procedural-memory strats; `/strat <cue>` shows one in full |
 
 ## Comparison with other observational-memory implementations
 
@@ -114,7 +146,7 @@ Observational memory takes the third path: **observe in the background, store du
 | **Robustness** ||||||
 | Anergy — stale-memory detection vs the live repo | ✓ | ✗ | ✗ | ✗ | ✗ |
 | Worker transport hardening (NUL-safe argv / E2BIG) | ✓ | – | ✗ | ◐ (branch) | – |
-| Secret redaction before persistence | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Secret redaction before persistence | ✓ (observations + prompts) | ✗ | ✗ | ✗ | ✓ |
 | Attachment/image gates | ✗ | ✗ | ✗ | ✗ | ✓ (2 MB) |
 | Debug logging actually wired to call sites | ✓ | ✓ | ✗⁸ | ✗⁸ | ✓ |
 | **Retrieval** ||||||
@@ -170,7 +202,7 @@ All settings live under the `observational-memory` key — global `~/.pi/agent/s
   "chunkOverlapTokens": 0,
   "poolTargetTokens": 10000,
   "consolidateAtPoolTokens": 15000,
-  "compactAtContextTokens": 150000,
+  "compactAtContextTokens": 64000,
   "tailTokens": 20000,
   "journeyTargetTokens": 1000,
   "observerConcurrency": 4,
@@ -187,14 +219,14 @@ All settings live under the `observational-memory` key — global `~/.pi/agent/s
 
 - `serialWorkers: true` = one worker at a time (use `/om-sequential`; made for local models).
 - `passive: true` (or env `PI_OM_PASSIVE=true`) is a kill-switch that suppresses all triggering.
-- `models.*` unset/`"off"` disables that role at runtime even when `/om on`, so an unconfigured provider can never block the pipeline.
+- Unset `models.*` fields fall back to the built-in default model — there is no per-role disable (use `passive: true` to suppress all triggering).
 - Setting `models.*` in a project config no longer discards the provider chosen in global config — partial overrides merge field-by-field.
 
 ## Development
 
 ```bash
 npm install
-npm test              # vitest — 160 tests in 21 files
+npm test              # vitest — 34 test files, 359 tests (P0–P5.2)
 npm run typecheck     # tsc --noEmit
 sh scripts/install.sh --test --no-register   # everything, without touching settings
 ```
@@ -206,9 +238,9 @@ Architecture notes: `src/ledger/*` (fold, projection, render) and `src/memory/*`
 Honest list, because the table above shows others doing some of this better:
 
 - **No built-in vector search or recall-by-id tool.** Retrieval is filesystem grep, optionally via [pi-second-brain](https://github.com/myusufalghifari10/pi-second-brain)'s `knowledge_search` (advertised at every compaction).
-- **No secret redaction or attachment/image gates yet.** Observations persist verbatim — nik1t7n's extension is currently the only one in this table that redacts. Treat what you paste into observed sessions accordingly.
+- **Attachment/image gates are absent.** Observations persist (redacted for known secret patterns) but not gated by size or type — nik1t7n's extension is still the only one in this table that refuses attachments outright. Treat what you paste into observed sessions accordingly.
 - **Memory is per-session** (fork-seeded, not project-shared). Two sessions in the same project keep separate `.memory/` trees.
-- **`.runs/` IPC files are never garbage-collected** (v1 trade-off; plain JSON, one pair per worker run).
+- **`.runs/` IPC files are garbage-collected only at session start, after 7 days** (one JSON pair per worker run; transient by design).
 
 ## Related project
 
