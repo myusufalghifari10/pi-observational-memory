@@ -12,6 +12,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCompactCommand } from "./commands/compact.js";
 import { registerConsolidateCommand } from "./commands/consolidate.js";
+import { registerStratCommand } from "./commands/strat.js";
 import { registerStatusCommand } from "./commands/status.js";
 import { registerSwitchingCommands } from "./commands/switching.js";
 import { registerCompactionHook } from "./hooks/compaction-hook.js";
@@ -111,6 +112,7 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 	registerStatusCommand(pi, runtime);
 	registerCompactCommand(pi, runtime);
 	registerConsolidateCommand(pi, runtime);
+	registerStratCommand(pi, runtime); // P4.3 — read-only strat list/show
 	// Mode/model switchers: work regardless of the /om gate (they only touch settings + runtime.config).
 	registerSwitchingCommands(pi, runtime);
 }

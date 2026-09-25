@@ -113,6 +113,8 @@ export type StratLine = {
 	path: string;
 	cue?: string;
 	summary?: string;
+	/** P4.3 — the one-shot command this strat cues (surfaced in section [7]). */
+	command?: string;
 };
 
 export type RenderSummaryV2Input = {
@@ -334,11 +336,16 @@ function unitLines(unit: BeliefUnit): string[] {
 }
 
 /** Section [7] one-liners: `<name> — <summary> `<path>`, name = cue || filename stem. */
-function renderStratLines(strats: StratLine[]): string[] {
+/**
+ * Section [7] one-liners: `<name> — <summary> \`<path>\` — run: \`<cmd>\`` (P4.3).
+ * Exported so the `/strat` list command shows EXACTLY what the block shows.
+ */
+export function renderStratLines(strats: StratLine[]): string[] {
 	return strats.map((strat) => {
 		const name = (strat.cue ?? "").trim() || strat.filename.replace(/\.md$/, "");
 		const summary = (strat.summary ?? "").trim();
-		return `- ${name}${summary ? ` — ${summary}` : ""} \`${strat.path}\``;
+		const command = (strat.command ?? "").trim();
+		return `- ${name}${summary ? ` — ${summary}` : ""} \`${strat.path}\`${command ? ` — run: \`${command}\`` : ""}`;
 	});
 }
 

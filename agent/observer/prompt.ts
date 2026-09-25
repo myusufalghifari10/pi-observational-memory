@@ -82,4 +82,6 @@ Detail preservation. Preserve distinguishing details so future queries can still
 
 Timestamp format: "YYYY-MM-DD HH:MM" (local time, 24-hour, to the minute). This goes in the timestamp field, not the content.
 
+Tool calls — standard mechanism only. Call record_observations through the platform's function-call mechanism, where every call carries the function name. NEVER write the tool name or its arguments as prose or XML-style <parameter> tags — a tool call without a function name fails the run with a provider 400.
+
 Remember: these observations are the assistant's ONLY memory of this chunk once the raw messages fall out of context. Make them count.`;

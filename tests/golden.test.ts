@@ -116,3 +116,14 @@ describe("golden determinism (P2.4 — C3 enforced forever)", () => {
 		}
 	});
 });
+
+describe("P4.2 pre-approach guard (golden-pinned instruction line)", () => {
+	it("both packed and fallback renders carry the standing DEATHS.md grep reflex", () => {
+		const { branch } = fixture();
+		for (const summary of [renderPacked(branch).summary, renderFallback(branch).summary]) {
+			expect(summary).toContain("Before choosing any new implementation approach");
+			expect(summary).toContain("grep .memory/DEATHS.md");
+			expect(summary).toContain("rejected approaches and their reasons");
+		}
+	});
+});

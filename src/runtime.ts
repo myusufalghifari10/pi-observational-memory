@@ -21,6 +21,18 @@ export class Runtime {
 	 */
 	generation = 0;
 
+	/**
+	 * P0.11: pi invalidates its extension ctx after session replacement or reload — every
+	 * later appendEntry throws. Once observed, the whole pipeline for this runtime is dead:
+	 * no commits, no pumps, no dispatches (isCurrentSession gates on this flag). Permanent
+	 * by design — pi never revives an invalidated ctx object.
+	 */
+	ctxStale = false;
+
+	markCtxStale(): void {
+		this.ctxStale = true;
+	}
+
 	/** The per-session on/off gate (default OFF). Outermost guard in every handler. */
 	enabled = false;
 

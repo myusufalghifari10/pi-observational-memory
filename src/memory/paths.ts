@@ -106,6 +106,38 @@ export function readDeaths(root: string): string | undefined {
 	}
 }
 
+/** One parsed DEATHS.md line (§2.1 convention). `verify` is `path` or `path#symbol`. */
+export type DeathEntry = {
+	approach: string;
+	reason: string;
+	verify?: string;
+};
+
+/**
+ * P4.1 — parse the §2.1 line convention, leniently and deterministically:
+ *   `- rejected: <approach> because <reason> (verify: <path[#symbol]>)`
+ * `(verify: …)` is optional; lines that don't match the convention (headings, prose,
+ * grouped edges from P4.4) are skipped rather than misparsed. Input order is preserved.
+ */
+export function parseDeaths(body: string | undefined): DeathEntry[] {
+	if (!body) return [];
+	const entries: DeathEntry[] = [];
+	for (const line of body.split("\n")) {
+		const match = /^-\s+rejected:\s+(.+?)\s+because\s+(.+)$/.exec(line.trim());
+		if (!match) continue;
+		let reason = match[2];
+		let verify: string | undefined;
+		const verifyMatch = /\s*\(verify:\s*([^)]+)\)\s*$/.exec(reason);
+		if (verifyMatch) {
+			verify = verifyMatch[1].trim();
+			reason = reason.slice(0, verifyMatch.index).trim();
+		}
+		if (reason.length === 0) continue;
+		entries.push({ approach: match[1].trim(), reason, ...(verify ? { verify } : {}) });
+	}
+	return entries;
+}
+
 /** Atomic write (temp + rename). Creates parent dirs as needed. */
 export function atomicWrite(path: string, content: string): void {
 	mkdirSync(dirname(path), { recursive: true });

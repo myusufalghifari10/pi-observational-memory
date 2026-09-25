@@ -37,6 +37,8 @@ import {
 	recordWorkerCost,
 	pumpWorkerQueue,
 	isCurrentSession,
+	isStaleCtxError,
+	safeAppendEntry,
 	noteWorkerFailure,
 	clearWorkerFailures,
 } from "./observer-trigger.js";
@@ -154,7 +156,9 @@ async function dispatchConsolidator(
 		if (toDrop.length > 0) {
 			const coversUpToId = lastSourceEntryId(branch);
 			if (coversUpToId) {
-				pi.appendEntry(OM_OBSERVATIONS_DROPPED, { observationTimestamps: toDrop, coversUpToId });
+				// P0.11 (review Note A): stale-safe like every observer commit — a stale throw
+				// here must mark ctxStale and skip the bookkeeping, not burn circuit-breaker state.
+				safeAppendEntry(pi, runtime, gen, runId, OM_OBSERVATIONS_DROPPED, { observationTimestamps: toDrop, coversUpToId });
 			}
 		}
 
@@ -170,6 +174,15 @@ async function dispatchConsolidator(
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		// P0.11 (review Note A): stale-ctx throws (dead pi API after session replacement or
+		// reload) are teardown artifacts — kill the pipeline, never burn breaker state, and
+		// never reach ui.notify (which would throw on the dead ctx and escape as an
+		// unhandled rejection — the original live crash class).
+		if (isStaleCtxError(error)) {
+			runtime.markCtxStale();
+			logIfEnabled(runtime.config.debugLog, "consolidator.stale-discard", { phase: "catch", error: message }, runId);
+			return;
+		}
 		// P0.1: stale session — discard without lastWorkerError, status, or toast.
 		if (!isCurrentSession(runtime, gen)) {
 			logIfEnabled(runtime.config.debugLog, "consolidator.stale-discard", { error: message }, runId);
@@ -189,7 +202,16 @@ async function dispatchConsolidator(
 }
 
 export function registerConsolidatorTrigger(pi: ExtensionAPI, runtime: Runtime): void {
-	const handler = (_event: unknown, ctx: TriggerCtx) => evaluateConsolidatorTrigger(pi, runtime, ctx);
+	const handler = (_event: unknown, ctx: TriggerCtx) => {
+		// P0.11: same sync-escape guard as the observer handler (stale ctx ⇒ graceful kill).
+		try {
+			evaluateConsolidatorTrigger(pi, runtime, ctx);
+		} catch (error) {
+			if (!isStaleCtxError(error)) throw error;
+			runtime.markCtxStale();
+			logIfEnabled(runtime.config.debugLog, "consolidator.stale-discard", { phase: "handler" });
+		}
+	};
 	pi.on("turn_end", handler as never);
 	pi.on("agent_start", handler as never);
 }

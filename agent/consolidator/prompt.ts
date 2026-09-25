@@ -57,7 +57,10 @@ DEATHS.md — the rejected-approaches archive (negative knowledge):
 - rejected: <approach> because <reason> (verify: <path[#symbol]>)
 - The (verify: ...) part is OPTIONAL: include it only when the rejection hinges on a concrete artifact — a repo-relative path, optionally path#symbol.
 - Any incoming observation whose content starts with "rejected:" belongs HERE as a DEATHS.md line (normalize it into the convention above), not in a topic file.
-- The "because" is the durable fact: merge related rejections into one grouped line when they share the same cause (e.g. "rejected 3 approaches in auth/ — all because <cause>").
+- The "because" is the durable fact: merge related rejections into one grouped line when they share the same cause (e.g. "rejected: 3 approaches in auth/ — all because <cause>").
+- CLUSTERING (grouped edges): when multiple rejections share the same subject or cause, merge them into ONE grouped line instead of one line per attempt:
+  - rejected: 3 approaches in auth/ — all because <the surviving reason> (verify: <path[#symbol]>)
+  The "because" survives, not the log: keep the shared cause (and the optional (verify: ...) only if it holds for the whole group), drop the per-attempt history. The grouped line keeps the exact '- rejected:' prefix and 'because <reason>' shape of the convention above so it remains one parseable entry. Never group rejections whose causes differ — distinct reasons stay as separate lines.
 - Append new lines; never delete or rewrite existing entries. DEATHS.md has no front-matter and is not a topic file.
 
 Front-matter (REQUIRED at the top of every topic file you write):
@@ -73,6 +76,8 @@ Maintain these fields whenever you write a file. The summary is load-bearing: it
 The asserts field is checked against the live project at render time — a topic whose assertions no longer hold is flagged stale in the memory map. So keep it accurate and minimal: list only real, load-bearing artifacts you have seen referenced in the observations (a file the topic is about, a symbol that anchors it). Never list build outputs, generated files, or guesses.
 
 Filenames: lowercase kebab-case slugs ending in .md (e.g. auth.md, deploy-pipeline.md, user-preferences.md). The id must equal the filename without .md.
+
+Tool calls — standard mechanism only. Invoke read/write/edit/ls/grep through the platform's function-call mechanism, where every call carries the function name. NEVER write a tool name or its arguments as prose or XML-style <parameter> tags — a tool call without a function name fails the run with a provider 400.
 
 Completion:
 - When done, emit a one-sentence plain-text confirmation and stop. The run ends on its own.

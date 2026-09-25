@@ -30,8 +30,9 @@ function mentionedInBuffer(activeObservations: Observation[], relPath: string): 
 	return activeObservations.some((observation) => observation.content.includes(relPath));
 }
 
-/** True when the artifact definitely exists (file/dir; symbol text found when given). */
-function assertionHolds(absPath: string, symbol: string | undefined): boolean {
+/** True when the artifact definitely exists (file/dir; symbol text found when given). P4.1
+ * exports it so DEATHS.md `(verify:)` revocation reuses the SAME assertion semantics. */
+export function assertionHolds(absPath: string, symbol: string | undefined): boolean {
 	try {
 		if (!existsSync(absPath)) return false;
 		if (symbol === undefined) return true;

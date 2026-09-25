@@ -70,7 +70,7 @@ export function clearWorkerFailures(runtime: Runtime): void {
  * retry-bookkeeping, and pump dispatch (P0.1).
  */
 export function isCurrentSession(runtime: Runtime, gen: number): boolean {
-	return runtime.generation === gen && runtime.enabled;
+	return runtime.generation === gen && runtime.enabled && !runtime.ctxStale;
 }
 
 /**
@@ -79,6 +79,43 @@ export function isCurrentSession(runtime: Runtime, gen: number): boolean {
  * Gated on the dispatch-time session generation (P0.1): a stale worker's spend must never
  * land in the replacing session's ledger.
  */
+/**
+ * P0.11 stale-ctx guard. pi invalidates its extension ctx after session replacement or
+ * reload — `pi.appendEntry` then THROWS ("This extension ctx is stale..."), which is a
+ * DIFFERENT axis from the P0.1 generation counters: the isCurrentSession check can pass
+ * microseconds before the invalidation lands. A teardown artifact must never crash the
+ * whole process (observed live: an unhandled rejection killed a worker run) nor burn a
+ * slice retry — the session is gone, the commit belongs to no live ledger.
+ */
+export function isStaleCtxError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /ctx is stale|session replacement or reload/i.test(message);
+}
+
+export function safeAppendEntry(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	gen: number,
+	runId: string,
+	type: string,
+	data: unknown,
+): void {
+	try {
+		if (!isCurrentSession(runtime, gen)) return;
+		pi.appendEntry(type, data);
+	} catch (error) {
+		if (isStaleCtxError(error)) {
+			// The pi API object is dead for good — kill the whole pipeline so neither the
+			// pump re-dispatches (an unlanded commit would re-select the same slice forever)
+			// nor any other completion tries to commit through the dead ctx.
+			runtime.markCtxStale();
+			logIfEnabled(runtime.config.debugLog, "worker.stale-discard", { phase: "append", type }, runId);
+			return;
+		}
+		throw error;
+	}
+}
+
 export function recordWorkerCost(
 	pi: ExtensionAPI,
 	runtime: Runtime,
@@ -90,7 +127,7 @@ export function recordWorkerCost(
 	if (!isCurrentSession(runtime, gen)) return;
 	const cost = readWorkerCost(runCostPath(runtime.memoryRoot, runId));
 	if (!cost) return;
-	pi.appendEntry(OM_COST, { costUsd: cost.costUsd, role, runId });
+	safeAppendEntry(pi, runtime, gen, runId, OM_COST, { costUsd: cost.costUsd, role, runId });
 	runtime.refreshCost(ctx.sessionManager.getEntries());
 }
 
@@ -123,6 +160,24 @@ function effectiveWatermarkId(runtime: Runtime, branch: Entry[]): string | undef
  */
 export function shouldYieldToConsolidator(poolTokensValue: number, consolidateAtPoolTokens: number): boolean {
 	return poolTokensValue >= consolidateAtPoolTokens;
+}
+
+/**
+ * P0.11 — provider validation error caused by a MALFORMED model tool-call. Live evidence
+ * (2026-09-25): mimo-v2.6-flash sometimes emits the tool name smuggled in XML-style
+ * `<parameter>` syntax with an EMPTY function name, so pi's replayed history carries
+ * `tool_calls[0]` without a name and the provider rejects the whole request:
+ * `400 {"code":"400","message":"Param Incorrect","param":"messages[2].tool_calls[0] is
+ * missing a function name"}`. This is a MODEL glitch, not an environment failure. It stays
+ * inside the existing bounded retry (recordSliceFailure: original + one retry, then the
+ * P3.1 give-up gap) — never a new retry budget — but toasts/lastWorkerError label it so the
+ * operator can tell it apart from real failures.
+ */
+export const TOOL_CALL_GLITCH_PATTERN = /missing a function name|Param Incorrect|tool_calls\[\d+\]/i;
+
+/** True when a worker failure message is the known malformed-tool-call model glitch (P0.11). */
+export function isToolCallGlitch(message: string): boolean {
+	return TOOL_CALL_GLITCH_PATTERN.test(message);
 }
 
 /**
@@ -197,7 +252,7 @@ export function pumpWorkerQueue(pi: ExtensionAPI, runtime: Runtime, ctx: Trigger
 	runtime.pumpQueued = true;
 	queueMicrotask(() => {
 		runtime.pumpQueued = false;
-		if (runtime.generation !== gen || !runtime.enabled || runtime.config.passive) return;
+		if (runtime.generation !== gen || !runtime.enabled || runtime.config.passive || runtime.ctxStale) return;
 		// The captured ctx can go stale across this async gap (session replacement or reload
 		// in between), and pi's ctx accessors throw on a stale ctx. A pump is opportunistic —
 		// never let it kill the process; the next turn_end/agent_start re-evaluates anyway.
@@ -206,6 +261,12 @@ export function pumpWorkerQueue(pi: ExtensionAPI, runtime: Runtime, ctx: Trigger
 			evaluateConsolidatorTrigger(pi, runtime, ctx);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			// P0.11: a stale throw is a teardown artifact — kill the pipeline silently.
+			if (isStaleCtxError(error)) {
+				runtime.markCtxStale();
+				logIfEnabled(runtime.config.debugLog, "worker.stale-discard", { phase: "pump", error: message });
+				return;
+			}
 			runtime.lastWorkerError = `worker pump skipped (stale session context): ${message}`;
 		}
 	});
@@ -393,7 +454,7 @@ async function dispatchObserver(
 		});
 
 		if (observations.length > 0) {
-			pi.appendEntry(OM_OBSERVATIONS_RECORDED, { observations, coversUpToId });
+			safeAppendEntry(pi, runtime, gen, runId, OM_OBSERVATIONS_RECORDED, { observations, coversUpToId });
 			// P1.3 (L2/L4): deterministic lexical supersession against the pre-commit buffer.
 			// The losing fact is never deleted — its pair renders adjacent ("believed X → now Y").
 			// §2.2 one-to-one: exclude observations that already lost a pair (see
@@ -405,14 +466,14 @@ async function dispatchObserver(
 			);
 			const supersededData = buildObservationsSupersededData(pairs, coversUpToId);
 			if (supersededData && isCurrentSession(runtime, gen)) {
-				pi.appendEntry(OM_OBSERVATIONS_SUPERSEDED, supersededData);
+				safeAppendEntry(pi, runtime, gen, runId, OM_OBSERVATIONS_SUPERSEDED, supersededData);
 			}
 		} else if (isCurrentSession(runtime, gen)) {
 			// §2.4 (P3.1): a clean zero-observation chunk still commits — an attempts:0 gap
 			// is semantically "acknowledged, nothing to record" (the recorded validator
 			// forbids empty observations). Renders nothing (silent); the flush-ack gate
 			// (P3.2) will count it as coverage.
-			pi.appendEntry(OM_OBSERVATIONS_GAP, {
+			safeAppendEntry(pi, runtime, gen, runId, OM_OBSERVATIONS_GAP, {
 				...(afterEntryId !== undefined ? { afterEntryId } : {}),
 				coversUpToId,
 				attempts: 0,
@@ -435,18 +496,31 @@ async function dispatchObserver(
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		// P0.11 (Note B): a stale-ctx throw can originate OUTSIDE the appendEntry sites
+		// (ctx accessors, ui.notify on a dead ctx). Classify it FIRST: teardown artifacts
+		// must never burn a slice retry nor reach the failure bookkeeping.
+		if (isStaleCtxError(error)) {
+			runtime.markCtxStale();
+			logIfEnabled(runtime.config.debugLog, "observer.stale-discard", { phase: "catch", error: message }, runId);
+			return;
+		}
 		// P0.1: stale session — discard without retry, lastWorkerError, status, or toast.
 		if (!isCurrentSession(runtime, gen)) {
 			logIfEnabled(runtime.config.debugLog, "observer.stale-discard", { error: message }, runId);
 			return;
 		}
-		runtime.lastWorkerError = message;
+		// P0.11: classify BEFORE bookkeeping so toasts/lastWorkerError carry the label.
+		// Same bounded retry as any failure (recordSliceFailure) — only the operator-facing
+		// wording differs: "(retrying)" while a retry is queued, "(failed)" at the give-up cap.
+		const glitch = isToolCallGlitch(message);
 		const gaveUp = recordSliceFailure(runtime, afterEntryId, coversUpToId);
+		const glitchLabel = glitch ? `model tool-call glitch (${gaveUp ? "failed" : "retrying"})` : undefined;
+		runtime.lastWorkerError = glitchLabel ? `${glitchLabel}: ${message}` : message;
 		if (gaveUp && isCurrentSession(runtime, gen)) {
 			// §2.4 (P3.1/L5/L9): the give-up marker IS the ack of this range — no silent
 			// holes. Renders as `⚠ UNOBSERVED WINDOW [after..covers]`; counted as coverage
 			// by the flush-ack gate (P3.2).
-			pi.appendEntry(OM_OBSERVATIONS_GAP, {
+			safeAppendEntry(pi, runtime, gen, runId, OM_OBSERVATIONS_GAP, {
 				...(afterEntryId !== undefined ? { afterEntryId } : {}),
 				coversUpToId,
 				attempts: 2,
@@ -454,11 +528,11 @@ async function dispatchObserver(
 			});
 		}
 		noteWorkerFailure(runtime, ctx.hasUI && ctx.ui ? (m, l) => ctx.ui!.notify(m, l) : undefined); // P0.4
-		logIfEnabled(runtime.config.debugLog, "observer.settle", { outcome: "error", error: message }, runId);
+		logIfEnabled(runtime.config.debugLog, "observer.settle", { outcome: "error", error: message, ...(glitch ? { toolCallGlitch: true } : {}) }, runId);
 		runtime.status.workerError(runId);
 		// Errors bypass the coalescer: they use a different display level and
 		// should never be merged with info lines.
-		if (ctx.hasUI) ctx.ui?.notify(`om: observer failed: ${message}`, "error");
+		if (ctx.hasUI) ctx.ui?.notify(`om: observer failed: ${glitchLabel ? `${glitchLabel}: ` : ""}${message}`, "error");
 	} finally {
 		runtime.observersInFlight.delete(runId);
 		// P0.1: never re-drive the queue from a completion that no longer belongs to this session.
@@ -467,7 +541,17 @@ async function dispatchObserver(
 }
 
 export function registerObserverTrigger(pi: ExtensionAPI, runtime: Runtime): void {
-	const handler = (_event: unknown, ctx: TriggerCtx) => evaluateObserverTriggers(pi, runtime, ctx);
+	const handler = (_event: unknown, ctx: TriggerCtx) => {
+		// P0.11: evaluateObserverTriggers' SYNC body calls ctx accessors that throw on a
+		// stale ctx — the throw must never escape into pi's event pipeline (live crash class).
+		try {
+			evaluateObserverTriggers(pi, runtime, ctx);
+		} catch (error) {
+			if (!isStaleCtxError(error)) throw error;
+			runtime.markCtxStale();
+			logIfEnabled(runtime.config.debugLog, "observer.stale-discard", { phase: "handler" });
+		}
+	};
 	pi.on("turn_end", handler as never);
 	pi.on("agent_start", handler as never);
 }

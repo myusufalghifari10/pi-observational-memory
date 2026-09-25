@@ -8,8 +8,9 @@
  *   - renderMemoryMap: the "memory map" section of the compaction injection block, built live
  *     from disk at each compaction and handed to renderSummary().
  */
-import type { Topic } from "./paths.js";
-import type { AnergyReport } from "./anergy.js";
+import type { DeathEntry, Topic } from "./paths.js";
+import { assertionHolds, type AnergyReport } from "./anergy.js";
+import { resolve } from "node:path";
 
 function summaryOf(topic: Topic): string {
 	const s = (topic.summary ?? "").trim();
@@ -49,8 +50,40 @@ export function renderIndexFile(topics: Topic[]): string {
  * buffer observation) render as a one-line stub instead of their summary — the map flags
  * memory-vs-repo drift without deleting or editing anything on disk.
  */
-export function renderMemoryMap(topics: Topic[], anergy?: AnergyReport): string | undefined {
-	if (topics.length === 0) return undefined;
+/** P4.1 — DEATHS.md data for section [4]: parsed lines + the cwd used to resolve `(verify:)`.
+ * fs lives HERE (index-render is an fs-owning module); the render block itself stays pure. */
+export type DeathsContext = {
+	entries: DeathEntry[];
+	projectCwd: string;
+};
+
+/**
+ * §2.1 death lines — cheap, revocable, never permanent (L11):
+ * - `(verify:)` absent or the assertion still holds ⇒ authoritative `- rejected: … — because …`;
+ * - the assertion FAILED ⇒ a one-line `- possibly-revived: … — re-verify before retrying`
+ *   stub instead of an authoritative "never do this" (re-verify, never delete — the
+ *   on-disk DEATHS.md is never touched by rendering).
+ */
+function renderDeathLines(deaths: DeathsContext): string[] {
+	return deaths.entries.map((entry) => {
+		if (entry.verify) {
+			const [relPath, ...symbolParts] = entry.verify.split("#");
+			const symbol = symbolParts.length > 0 ? symbolParts.join("#") : undefined;
+			if (relPath && !assertionHolds(resolve(deaths.projectCwd, relPath), symbol || undefined)) {
+				return `- possibly-revived: ${entry.approach} — re-verify before retrying (because ${entry.reason})`;
+			}
+		}
+		return `- rejected: ${entry.approach} — because ${entry.reason}`;
+	});
+}
+
+export function renderMemoryMap(
+	topics: Topic[],
+	anergy?: AnergyReport,
+	deaths?: DeathsContext,
+): string | undefined {
+	const deathLines = deaths ? renderDeathLines(deaths) : [];
+	if (topics.length === 0 && deathLines.length === 0) return undefined;
 	const lines: string[] = [
 		"## Memory map",
 		"Durable long-term notes live in `.memory/`. Read a file when a topic below looks relevant; these summaries are intentionally terse.",
@@ -64,5 +97,7 @@ export function renderMemoryMap(topics: Topic[], anergy?: AnergyReport): string 
 		const updated = topic.updated ? ` (updated ${topic.updated})` : "";
 		lines.push(`- \`${topic.path}\` — ${summaryOf(topic)}${updated}`);
 	}
+	// P4.1: death stubs join section [4] after the topic rows (§2.3 map semantics).
+	lines.push(...deathLines);
 	return lines.join("\n");
 }

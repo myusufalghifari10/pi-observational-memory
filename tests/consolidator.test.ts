@@ -37,6 +37,38 @@ describe("P1.4 consolidator duties (prompt)", () => {
 	});
 });
 
+describe("P4.4 death clustering (prompt)", () => {
+	it("instructs merging same-subject rejections into ONE grouped line", () => {
+		expect(CONSOLIDATOR_SYSTEM).toContain("CLUSTERING (grouped edges)");
+		expect(CONSOLIDATOR_SYSTEM).toContain("merge them into ONE grouped line");
+		expect(CONSOLIDATOR_SYSTEM).toContain("instead of one line per attempt");
+	});
+
+	it("pins the grouped-edge example shape: - rejected prefix, shared cause, optional verify", () => {
+		expect(CONSOLIDATOR_SYSTEM).toContain(
+			"- rejected: 3 approaches in auth/ — all because <the surviving reason> (verify: <path[#symbol]>)",
+		);
+	});
+
+	it("states the acceptance: the 'because' survives, not the log", () => {
+		expect(CONSOLIDATOR_SYSTEM).toContain('The "because" survives, not the log');
+		expect(CONSOLIDATOR_SYSTEM).toContain("drop the per-attempt history");
+	});
+
+	it("keeps the grouped line parseable (the '- rejected:' prefix shape) and never merges distinct causes", () => {
+		expect(CONSOLIDATOR_SYSTEM).toContain("'- rejected:' prefix");
+		expect(CONSOLIDATOR_SYSTEM).toContain("one parseable entry");
+		expect(CONSOLIDATOR_SYSTEM).toContain("Never group rejections whose causes differ");
+	});
+
+	it("preserves the P0.11 tool-call hardening and the base DEATHS convention (no regression)", () => {
+		expect(CONSOLIDATOR_SYSTEM).toContain("standard mechanism only");
+		expect(CONSOLIDATOR_SYSTEM).toContain(
+			"- rejected: <approach> because <reason> (verify: <path[#symbol]>)",
+		);
+	});
+});
+
 describe("buildWorkerEnv(consolidator)", () => {
 	it("sets role, run id, and the .memory sandbox root", () => {
 		const env = buildWorkerEnv("consolidator", { memoryRoot: "/proj/.memory/sess-1", runId: "c1" });
