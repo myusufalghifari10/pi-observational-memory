@@ -216,8 +216,18 @@ One-to-one: each observation participates in at most one pair (newest wins).
     markers (from gap entries) — the recency anchor
 ```
 
-Budget: `RENDER_BUDGET_TOKENS = 18_000` for sections [5]+[6] combined (constant in
-`src/ledger/render.ts`); reserved sections exempt (L7). Render function shape:
+Budget: `RENDER_BUDGET_TOKENS = 18_000` (constant in `src/ledger/render.ts`) — topic/STATE
+section-[5] candidates and section [6] are token-charged against it (topics reserve first,
+then [6] packs the remainder); reserved sections exempt (L7). **Line-capped exception (locked
+2026-09-25, supervisor decision after the P3a defect proof):** section-[5] *observation
+teasers* (top-k lines that did NOT make the [6] knapsack — §2.6) are **line-capped at
+RELEVANT_TOP_K = 5, NOT token-charged**. Rationale: charging them against the same budget
+makes the teaser path structurally unreachable exactly when it matters most (budget full —
+proven by the greedy invariant: any [6]-evicted unit's cost exceeds the leftover). Grouped by
+the tests/relevant.test.ts 'Fix A / Fix B' block; the §2.3 'combined' wording is superseded
+accordingly.
+
+Render function shape:
 
 ```ts
 export function renderSummaryV2(input: {

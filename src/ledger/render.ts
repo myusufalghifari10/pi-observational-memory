@@ -1,6 +1,6 @@
 import { identifierTokens } from "./supersede.js";
 import { packRanked, scoreLine, type LineMeta, type RankedLine } from "./trust.js";
-import type { Observation } from "./types.js";
+import type { Gap, Observation } from "./types.js";
 
 /** §2.3 token budget shared by sections [5]+[6]; reserved sections are exempt (L7). */
 export const RENDER_BUDGET_TOKENS = 18_000;
@@ -50,9 +50,9 @@ export function renderSummary(journey: string | undefined, map: string | undefin
 // renderSummaryV2 — the §2.3 block layout (P1.5 chronological seam; P2.3 packing).
 //
 // Seams left for later phases:
-//   [8] UNOBSERVED WINDOW markers — P3.1 appends them from `om.observations.gap`
-//                          entries (attempts >= 2); render NOTHING for gaps now
-//                          (TODO(P3.1)).
+//   [8] UNOBSERVED WINDOW markers — implemented in P3.1: `⚠ UNOBSERVED WINDOW
+//                          [after..covers]` lines for gaps with attempts >= 2,
+//                          appended after Open loops; attempts:0 gaps render nothing.
 //   [5] RELEVANT MEMORY renders §2.6 lexical top-k from P2.5 on (see selectRelevant).
 //
 // C3 still holds: every input below is durable state handed in by the caller — no
@@ -145,67 +145,77 @@ export type RenderSummaryV2Input = {
 	strats?: StratLine[];
 	/** [8] STATE's Open-loops body, already extracted (see `extractOpenLoops`). */
 	openLoops?: string;
-};
-
-/** One admitted section-[5] line: id, display text, and the tokens it spent. */
-type RelevantCandidate = {
-	id: string;
-	line: string;
-	tokens: number;
+	/**
+	 * [8] fold.gaps — UNOBSERVED WINDOW markers (P3.1, §2.4). `attempts >= 2` renders
+	 * `⚠ UNOBSERVED WINDOW [after..covers]`; `attempts: 0` ("acked, nothing to record")
+	 * renders nothing. Order = input order (= fold's branch order, deterministic).
+	 */
+	gaps?: Gap[];
 };
 
 /**
- * P2.5 — §2.6 lexical top-k for section [5]. Pure: same tokenizer as §2.2, no IO.
- *
- * Pool = hook-built candidates (topic summaries + STATE lines) PLUS every typed
- * observation's line. Score each against `query` (shared-identifier count), drop
- * zeros, rank score desc / id asc (via the single admission loop), cap at TOP_K by
- * rank, then admit greedily within `budget`. Lines that end up in section [6] are
- * dropped by the caller afterwards (dedup): [5] is a teaser for what the knapsack
- * did NOT already show.
+ * One packable section-[5] entry: relevance-ranked, rendered as one or more lines
+ * (a belief unit renders its whole `believed:`/`now:` group — Fix B, L4 partner adjacency).
  */
-function selectRelevant(
-	query: string | undefined,
-	candidates: ScoredLine[],
-	observations: readonly Observation[],
-	metaByTimestamp: Map<string, LineMeta> | undefined,
-	budget: number,
-): RelevantCandidate[] {
-	if (!query || query.trim().length === 0) return [];
-	const queryTokens = identifierTokens(query);
-	if (queryTokens.size === 0) return [];
+type RelevantEntry = RankedLine & { lines: string[] };
 
-	type PoolLine = RankedLine & { line: string };
-	const pool: PoolLine[] = [];
+/** Score hook-built topic/STATE candidates ([5]-only) against the query's identifiers. */
+function scoreTopicEntries(queryTokens: ReadonlySet<string>, candidates: ScoredLine[]): RelevantEntry[] {
+	const entries: RelevantEntry[] = [];
 	for (const candidate of candidates) {
 		const score = sharedWith(queryTokens, candidate.text);
 		if (score <= 0) continue;
-		pool.push({
+		entries.push({
 			timestamp: candidate.id,
 			score,
 			tokens: Math.max(1, candidate.meta.tokenCount),
-			line: candidate.text,
+			lines: [candidate.text],
 		});
 	}
-	for (const observation of observations) {
-		const score = sharedWith(queryTokens, observation.content);
-		if (score <= 0) continue;
-		pool.push({
-			timestamp: observation.timestamp,
-			score,
-			tokens: Math.max(1, metaByTimestamp?.get(observation.timestamp)?.tokenCount ?? observation.tokenCount),
-			line: observationToLine(observation),
-		});
-	}
-	if (pool.length === 0) return [];
+	return entries;
+}
 
-	// Single admission loop ranks score desc / id asc; the top-k cap slices the FIRST
-	// RELEVANT_TOP_K ranks (rank-position cap, §2.6) before filtering on budget.
-	const { ranked, admitted } = packRanked(pool, budget);
-	return ranked
-		.slice(0, RELEVANT_TOP_K)
-		.filter((_entry, index) => admitted[index])
-		.map((entry) => ({ id: entry.timestamp, line: entry.line, tokens: entry.tokens }));
+/**
+ * §2.6 section-[5] teasers: belief units section [6] did NOT admit, scored against the
+ * query. Fix B — a multi-member unit enters as ONE entry rendering its whole group
+ * (`believed:`/`now:` partners adjacent, never a bare member). A unit admitted to [6] is
+ * excluded (dedup: a line must never render twice in one block). Pure, same tokenizer.
+ */
+function scoreTeaserEntries(
+	queryTokens: ReadonlySet<string>,
+	units: BeliefUnit[],
+	admittedObservationIds: ReadonlySet<string>,
+	metaByTimestamp: Map<string, LineMeta> | undefined,
+): RelevantEntry[] {
+	const entries: RelevantEntry[] = [];
+	for (const unit of units) {
+		const first = unit.members[0];
+		if (!first || admittedObservationIds.has(first.timestamp)) continue; // in [6] ⇒ dedup
+		const text = unit.members.map((member) => member.content).join(" ");
+		const score = sharedWith(queryTokens, text);
+		if (score <= 0) continue;
+		const tokens = unit.members.reduce(
+			(sum, member) => sum + Math.max(1, metaByTimestamp?.get(member.timestamp)?.tokenCount ?? member.tokenCount),
+			0,
+		);
+		entries.push({ timestamp: first.timestamp, score, tokens, lines: unitLines(unit) });
+	}
+	return entries;
+}
+
+/** Greedy pick: rank-score desc / id asc, admit while within `budget` and `maxLines`. */
+function admitRelevant(entries: RelevantEntry[], budget: number, maxLines: number): RelevantEntry[] {
+	const { ranked, admitted } = packRanked(entries, budget);
+	const picked: RelevantEntry[] = [];
+	let lines = 0;
+	for (let i = 0; i < ranked.length; i++) {
+		if (!admitted[i]) continue;
+		const entry = ranked[i];
+		if (lines + entry.lines.length > maxLines) continue;
+		picked.push(entry);
+		lines += entry.lines.length;
+	}
+	return picked;
 }
 
 /**
@@ -339,7 +349,8 @@ function renderStratLines(strats: StratLine[]): string[] {
  *   [6] OBSERVATIONS (knapsack-packed belief units under RENDER_BUDGET_TOKENS;
  *       L6 fallback ⇒ chronological; supersession pairs adjacent)
  *   [7] STRATS (omitted when empty)
- *   [8] OPEN LOOPS — the recency anchor, always the LAST section (P3.1 gap markers append here)
+ *   [8] OPEN LOOPS — the recency anchor, always the LAST ## section (P3.1 gap markers
+ *       are headingless warnings that trail it)
  *
  * Every section except [1] is omitted wholesale when empty, so an all-empty input returns ""
  * (delegating to pi's native summarizer, as v1 did).
@@ -352,8 +363,23 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 	const journeyText = input.journey?.trim();
 	const mapText = input.map?.trim();
 	const openLoops = input.openLoops?.trim();
+	// [8] UNOBSERVED WINDOW markers (P3.1, §2.4): attempts >= 2 only — attempts:0 gaps
+	// render nothing (silent ack). Headingless warning lines trail the final section;
+	// the §2.4 tail 're-read ledger lines X..Y' is omitted (line refs are unknowable
+	// to this pure renderer). Computed early: a give-up warning is load-bearing (L5 —
+	// "no silent holes"), so its presence alone defeats the all-empty early return.
+	const unobserved = (input.gaps ?? [])
+		.filter((gap) => gap.attempts >= 2)
+		.map((gap) => `⚠ UNOBSERVED WINDOW [${gap.afterEntryId ?? "start"}..${gap.coversUpToId}]`);
 
-	if (!stateBody && !journeyText && !mapText && strats.length === 0 && sorted.length === 0) {
+	if (
+		!stateBody &&
+		!journeyText &&
+		!mapText &&
+		strats.length === 0 &&
+		sorted.length === 0 &&
+		unobserved.length === 0
+	) {
 		return { summary: "", packExplain: { fallback: false, lines: [] } };
 	}
 
@@ -364,18 +390,17 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 	const fallback = sorted.some((observation) => !metaByTimestamp?.has(observation.timestamp));
 	const budget = input.budget ?? RENDER_BUDGET_TOKENS;
 
-	// P2.5 — [5] FIRST: its tokens are counted against the full budget, then [6] packs
-	// the remainder (§2.3 shared budget). Dedup against [6]'s admissions happens after
-	// [6] packs (a teaser line that made the knapsack is dropped from [5]; its budget is
-	// conservatively kept — deterministic and never over budget).
-	const relevantCandidates = selectRelevant(
-		input.query,
-		input.candidates ?? [],
-		sorted,
-		metaByTimestamp,
-		budget,
-	);
-	const usedRelevant = relevantCandidates.reduce((sum, candidate) => sum + candidate.tokens, 0);
+	// §2.6 two-phase section [5] (Fix A exclude-then-cap): TOPIC/STATE candidates are [5]-only
+	// and reserve budget FIRST — preserving P2b's "[5] counts first" priority (test (d)).
+	// Observations are NOT reserved here: each renders once, either in [6] or as a [5] teaser
+	// after [6] packs — so a deduped line never double-reserves budget (Fix A, second clause).
+	const queryTokens =
+		input.query && input.query.trim().length > 0 && identifierTokens(input.query).size > 0
+			? identifierTokens(input.query)
+			: undefined;
+	const topicEntries = queryTokens ? scoreTopicEntries(queryTokens, input.candidates ?? []) : [];
+	const reservedTopics = admitRelevant(topicEntries, budget, RELEVANT_TOP_K);
+	const topicTokens = reservedTopics.reduce((sum, entry) => sum + entry.tokens, 0);
 
 	let observationLines: string[];
 	let packExplain: PackExplain;
@@ -413,8 +438,8 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 				unit,
 			};
 		});
-		// [6] gets what [5] left of the shared budget.
-		const { ranked, admitted } = packRanked(rankedUnits, budget - usedRelevant);
+		// [6] packs against the budget the reserved topics left.
+		const { ranked, admitted } = packRanked(rankedUnits, budget - topicTokens);
 		observationLines = ranked.flatMap((entry, index) => (admitted[index] ? unitLines(entry.unit) : []));
 		packExplain = {
 			fallback: false,
@@ -434,9 +459,23 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 		);
 	}
 
-	// Dedup: [5] is a teaser for what [6] did NOT already show (§2.6 top-k excludes
-	// knapsack admissions — a line must never render twice in one block).
-	const visibleRelevant = relevantCandidates.filter((candidate) => !admittedObservationIds.has(candidate.id));
+	// [5] teasers (§2.6 Option A): belief units [6] did NOT admit, scored against the query
+	// and kept WHOLE (Fix B: believed:/now: partners adjacent, never a bare member).
+	// TOKEN CHARGE: topics were already charged at reservation (they shrank [6] — test (d));
+	// observation teasers are LINE-CAPPED ONLY (RELEVANT_TOP_K). Charging a teaser from the
+	// leftover is the P3a defect — a unit evicted by [6] provably costs more than the leftover
+	// it left, so [5] became structurally unreachable exactly when the budget was tight. The
+	// parent-locked exemption keeps the exclude-then-cap order (Fix A): [6]-admitted units are
+	// dropped at pool build (scoreTeaserEntries), then the COMBINED topics+teasers list is
+	// ranked and line-capped here — a [6]-bound line never wastes a rank slot.
+	const teaserEntries = queryTokens
+		? scoreTeaserEntries(queryTokens, units, admittedObservationIds, metaByTimestamp)
+		: [];
+	const visibleRelevant = admitRelevant(
+		[...reservedTopics, ...teaserEntries],
+		Number.POSITIVE_INFINITY, // no token charge in this pass — the binding cap is the line cap
+		RELEVANT_TOP_K,
+	);
 
 	const parts: string[] = [input.instructions ?? CONTEXT_USAGE_INSTRUCTIONS];
 
@@ -453,7 +492,7 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 	// [5] RELEVANT MEMORY — §2.6 lexical top-k teaser (P2.5): lines that scored >0
 	// against `query` and did NOT already make the [6] knapsack. Omitted when empty.
 	if (visibleRelevant.length > 0) {
-		parts.push(`## Relevant memory\n${visibleRelevant.map((candidate) => candidate.line).join("\n")}`);
+		parts.push(`## Relevant memory\n${visibleRelevant.flatMap((entry) => entry.lines).join("\n")}`);
 	}
 	// [6] OBSERVATIONS — knapsack-packed belief units (P2.3); L6 fallback ⇒ chronological.
 	if (observationLines.length > 0) {
@@ -461,10 +500,9 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 	}
 	// [7] STRATS — omitted when the registry is empty.
 	if (strats.length > 0) parts.push(`## Strats\n${renderStratLines(strats).join("\n")}`);
-	// [8] OPEN LOOPS — recency anchor: must be the block's final section.
-	// TODO(P3.1): append `⚠ UNOBSERVED WINDOW [idA..idB]` markers from om.observations.gap
-	// entries (attempts >= 2) right after this section; render nothing for gaps until then.
+	// [8] OPEN LOOPS — recency anchor: the final ## section of the block.
 	if (openLoops) parts.push(`## Open loops\n${openLoops}`);
+	if (unobserved.length > 0) parts.push(unobserved.join("\n"));
 
 	return { summary: parts.join("\n\n"), packExplain };
 }

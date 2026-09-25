@@ -15,6 +15,7 @@ import {
 	observationToLine,
 	buildObservationsSupersededData,
 	OM_COST,
+	OM_OBSERVATIONS_GAP,
 	OM_OBSERVATIONS_RECORDED,
 	OM_OBSERVATIONS_SUPERSEDED,
 	type Entry,
@@ -129,8 +130,12 @@ export function shouldYieldToConsolidator(poolTokensValue: number, consolidateAt
  * on a later evaluation instead of being silently skipped by the advancing dispatch watermark.
  * Upserts by coversUpToId; once an entry's attempts reaches 2 the slice is dropped (we give up
  * after 2 total tries: the original dispatch + one retry).
+ *
+ * @returns true ONLY on the call that first reaches the give-up cap — the caller commits the
+ *   `om.observations.gap` (`attempts: 2`) ack there (§2.4 / P3.1). A retry already past the
+ *   cap returns false (idempotent: never a second gap for the same range).
  */
-export function recordSliceFailure(runtime: Runtime, afterEntryId: string | undefined, coversUpToId: string): void {
+export function recordSliceFailure(runtime: Runtime, afterEntryId: string | undefined, coversUpToId: string): boolean {
 	// Count from the PERSISTENT map, not the queue: takeRetrySlice consumes the entry on dispatch,
 	// so counting queue lookups would reset to 1 after every take and loop forever on a broken chunk.
 	const attempts = (runtime.sliceAttemptCounts.get(coversUpToId) ?? 0) + 1;
@@ -140,11 +145,12 @@ export function recordSliceFailure(runtime: Runtime, afterEntryId: string | unde
 		// and do NOT re-queue — the range is never dispatched again.
 		const queued = runtime.failedSlices.findIndex((entry) => entry.coversUpToId === coversUpToId);
 		if (queued >= 0) runtime.failedSlices.splice(queued, 1);
-		return;
+		return attempts === 2; // first time at the cap ⇒ commit the give-up gap; later calls are no-ops
 	}
 	const existing = runtime.failedSlices.find((entry) => entry.coversUpToId === coversUpToId);
 	if (existing) existing.attempts = attempts;
 	else runtime.failedSlices.push({ afterEntryId, coversUpToId, attempts });
+	return false;
 }
 
 /** Forget a failed slice (its retry committed, or the range vanished from the branch). */
@@ -401,6 +407,17 @@ async function dispatchObserver(
 			if (supersededData && isCurrentSession(runtime, gen)) {
 				pi.appendEntry(OM_OBSERVATIONS_SUPERSEDED, supersededData);
 			}
+		} else if (isCurrentSession(runtime, gen)) {
+			// §2.4 (P3.1): a clean zero-observation chunk still commits — an attempts:0 gap
+			// is semantically "acknowledged, nothing to record" (the recorded validator
+			// forbids empty observations). Renders nothing (silent); the flush-ack gate
+			// (P3.2) will count it as coverage.
+			pi.appendEntry(OM_OBSERVATIONS_GAP, {
+				...(afterEntryId !== undefined ? { afterEntryId } : {}),
+				coversUpToId,
+				attempts: 0,
+				lastError: "no observations extracted",
+			});
 		}
 		runtime.status.workerDone(runId, observations.length);
 		clearSliceFailure(runtime, coversUpToId);
@@ -424,7 +441,18 @@ async function dispatchObserver(
 			return;
 		}
 		runtime.lastWorkerError = message;
-		recordSliceFailure(runtime, afterEntryId, coversUpToId);
+		const gaveUp = recordSliceFailure(runtime, afterEntryId, coversUpToId);
+		if (gaveUp && isCurrentSession(runtime, gen)) {
+			// §2.4 (P3.1/L5/L9): the give-up marker IS the ack of this range — no silent
+			// holes. Renders as `⚠ UNOBSERVED WINDOW [after..covers]`; counted as coverage
+			// by the flush-ack gate (P3.2).
+			pi.appendEntry(OM_OBSERVATIONS_GAP, {
+				...(afterEntryId !== undefined ? { afterEntryId } : {}),
+				coversUpToId,
+				attempts: 2,
+				lastError: message,
+			});
+		}
 		noteWorkerFailure(runtime, ctx.hasUI && ctx.ui ? (m, l) => ctx.ui!.notify(m, l) : undefined); // P0.4
 		logIfEnabled(runtime.config.debugLog, "observer.settle", { outcome: "error", error: message }, runId);
 		runtime.status.workerError(runId);

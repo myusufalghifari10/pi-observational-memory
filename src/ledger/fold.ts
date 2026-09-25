@@ -1,11 +1,14 @@
 import {
 	isObservationsDroppedData,
+	isObservationsGapData,
 	isObservationsRecordedData,
 	isObservationsSupersededData,
 	OM_OBSERVATIONS_DROPPED,
+	OM_OBSERVATIONS_GAP,
 	OM_OBSERVATIONS_RECORDED,
 	OM_OBSERVATIONS_SUPERSEDED,
 	type Entry,
+	type Gap,
 	type Observation,
 } from "./types.js";
 
@@ -36,6 +39,12 @@ export type FoldedLedger = {
 	 * (plan §3 P2.2). Consumed by `buildLineMeta` for the staleness factor of `scoreLine`.
 	 */
 	observationAgeCompactions: Map<string, number>;
+	/**
+	 * P3.1 (§2.4) — valid gap entries in branch order (chronological by entry position),
+	 * branch-local like every other fold surface (rolls back under /tree). `attempts: 0`
+	 * = acked-empty (silent in render); `attempts >= 2` = UNOBSERVED WINDOW renderer.
+	 */
+	gaps: Gap[];
 };
 
 function foldEndIndex(entries: Entry[], upToEntryId: string | undefined): number {
@@ -62,6 +71,7 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 	const supersessions = new Map<string, string>();
 	const coveringIndexByTimestamp = new Map<string, number>();
 	const compactionIndices: number[] = [];
+	const gaps: Gap[] = [];
 	const endIdx = foldEndIndex(entries, options.upToEntryId);
 
 	for (let i = 0; i <= endIdx; i++) {
@@ -87,6 +97,12 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 			for (const timestamp of entry.data.observationTimestamps) {
 				droppedObservationTimestamps.add(timestamp);
 			}
+			continue;
+		}
+
+		if (isCustomEntry(entry, OM_OBSERVATIONS_GAP)) {
+			if (!isObservationsGapData(entry.data)) continue;
+			gaps.push(entry.data);
 			continue;
 		}
 
@@ -123,5 +139,6 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 		observationsByTimestamp,
 		supersessions,
 		observationAgeCompactions,
+		gaps,
 	};
 }

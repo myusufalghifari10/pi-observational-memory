@@ -271,6 +271,34 @@ describe("renderSummaryV2 (P2.3 — knapsack, L6 fallback, PackExplain)", () => 
 		for (const line of packExplain.lines) expect(summary.includes(line.id)).toBe(line.admitted);
 	});
 
+	it("teasers are line-capped, not token-charged (§2.6 Option A exemption)", () => {
+		// Parent-locked decision (p3a2): topics still reserve from [6], but an OBSERVATION
+		// teaser is a unit [6] already rejected — charging it from the leftover would make it
+		// provably unaffordable (a unit's cost > the leftover it left, by the greedy invariant)
+		// and kill [5] exactly when the budget is tight. Reproducer arithmetic: budget 25
+		// ⇒ [6] spends 20, leftover 5 — the 10-token evicted zebra unit MUST still surface.
+		const observations = [1, 2, 3].map((n) =>
+			observation(at(n), { content: `zebra fact ${n}`, tokenCount: 10, kind: "assertion", sourceEntryId: "e1" }),
+		);
+		const observationMeta = metaMapFor(observations);
+		const { summary, packExplain } = renderSummaryV2({
+			state: { body: "## Goal\nZoology." },
+			query: "zebra",
+			observations,
+			observationMeta,
+			budget: 25,
+		});
+		// [6] spends 20 of 25 (obs1, obs2 admitted; obs3 evicted at 30 > 25)…
+		const admitted = packExplain.lines.filter((line) => line.admitted).map((line) => line.id);
+		expect(admitted).toEqual([at(1), at(2)]);
+		// …so the leftover (5) is smaller than obs3's cost (10) — and obs3 STILL renders in [5]:
+		const relevant = summary.split("## Relevant memory\n")[1]?.split("\n\n## ")[0];
+		expect(relevant).toBeDefined();
+		expect(relevant).toContain(`${at(3)}  zebra fact 3`);
+		expect(relevant).not.toContain(at(1));
+		expect(relevant).not.toContain(at(2));
+	});
+
 	it("(b) evicts a stale low-trust line before a fresh user-asserted one", () => {
 		const stale = observation(at(1), {
 			content: "stale model-derived claim",
@@ -532,6 +560,129 @@ describe("compaction hook wiring (P1.5 acceptance: §2.3 block actually emitted)
 				return cut >= 0 ? after.slice(0, cut) : after;
 			};
 			expect(obsSection(summary)).toBe(obsSection(renderSummary(undefined, undefined, [legacy])));
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("P3.1 [8] UNOBSERVED WINDOW markers (§2.4)", () => {
+	const gapAttempts2 = {
+		afterEntryId: "raw-1",
+		coversUpToId: "raw-4",
+		attempts: 2,
+		lastError: "observer exited with code 1: boom",
+	};
+	const gapAttempts0 = {
+		afterEntryId: "raw-4",
+		coversUpToId: "raw-9",
+		attempts: 0,
+		lastError: "no observations extracted",
+	};
+
+	it("renders one ⚠ line per attempts>=2 gap, in input order, after the Open loops section", () => {
+		const { summary } = renderSummaryV2({
+			observations: [],
+			openLoops: "- finish P3",
+			gaps: [
+				gapAttempts2,
+				{ afterEntryId: "raw-9", coversUpToId: "raw-12", attempts: 2, lastError: "again" },
+			],
+		});
+		const marker = "⚠ UNOBSERVED WINDOW [";
+		const lines = summary.split("\n").filter((line) => line.startsWith(marker));
+		expect(lines).toEqual([
+			"⚠ UNOBSERVED WINDOW [raw-1..raw-4]",
+			"⚠ UNOBSERVED WINDOW [raw-9..raw-12]",
+		]);
+		// Trailing the recency anchor: Open loops stays the final ## section, markers follow.
+		expect(summary.lastIndexOf("## Open loops")).toBeLessThan(summary.indexOf(marker));
+		expect([...summary.matchAll(/^## .*/gm)].map((m) => m[0]).at(-1)).toBe("## Open loops");
+		expect(summary.trimEnd().endsWith("⚠ UNOBSERVED WINDOW [raw-9..raw-12]")).toBe(true);
+	});
+
+	it("attempts:0 gaps are SILENT — byte-identical output to an input with no gaps at all", () => {
+		const base = { observations: [], openLoops: "- finish P3" };
+		const withoutGaps = renderSummaryV2({ ...base }).summary;
+		const withSilentGaps = renderSummaryV2({ ...base, gaps: [gapAttempts0, gapAttempts0] }).summary;
+		expect(withSilentGaps).toBe(withoutGaps);
+		expect(withSilentGaps).not.toContain("⚠ UNOBSERVED WINDOW");
+	});
+
+	it("mixed gaps: only attempts>=2 renders; first-chunk gap (no afterEntryId) shows [start..id]", () => {
+		const { summary } = renderSummaryV2({
+			observations: [],
+			gaps: [gapAttempts0, { coversUpToId: "raw-3", attempts: 2, lastError: "x" }],
+		});
+		expect(summary).not.toContain("raw-9");
+		expect(summary).toContain("⚠ UNOBSERVED WINDOW [start..raw-3]");
+		// Without Open loops the markers still render (independent of section [8]'s body).
+		expect(summary).not.toContain("## Open loops");
+	});
+
+	it("rendering with gaps is deterministic: identical input ⇒ byte-identical output (C3)", () => {
+		const input = { observations: [], gaps: [gapAttempts2, gapAttempts0] };
+		expect(renderSummaryV2(input).summary).toBe(renderSummaryV2(input).summary);
+	});
+});
+
+describe("P3.1 gap wiring (WS2 blocker regression: markers reachable from the production hook)", () => {
+	it("session_before_compact emits ⚠ UNOBSERVED WINDOW for attempts:2 gaps and stays silent for attempts:0", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "om-hook-gap-"));
+		try {
+			const memoryRoot = join(cwd, ".memory", "test-session");
+			mkdirSync(memoryRoot, { recursive: true });
+
+			const runtime = new Runtime();
+			runtime.enabled = true;
+			runtime.memoryRoot = memoryRoot;
+
+			const handlers: Record<string, (event: unknown, ctx: unknown) => Promise<unknown>> = {};
+			const pi = {
+				on: (name: string, handler: (event: unknown, ctx: unknown) => Promise<unknown>) => {
+					handlers[name] = handler;
+				},
+			};
+			registerCompactionHook(pi as never, runtime);
+
+			const gapEntry = (id: string, data: Record<string, unknown>) => ({
+				type: "custom",
+				id,
+				parentId: null,
+				timestamp: "2026-09-25T10:00:00",
+				customType: "om.observations.gap",
+				data,
+			});
+			const branch = [
+				rawMessage("e1", "opening message"),
+				// Silent ack — zero-obs chunk (§2.4): MUST NOT render a marker.
+				gapEntry("gap-silent", { coversUpToId: "e1", attempts: 0, lastError: "no observations extracted" }),
+				rawMessage("e2", "raw after silent gap"),
+				// Give-up gap (attempts:2) — MUST render exactly one UNOBSERVED WINDOW marker.
+				gapEntry("gap-lost", { afterEntryId: "e2", coversUpToId: "e3", attempts: 2, lastError: "observer exited 1" }),
+				rawMessage("e3", "cut starts here"),
+				rawMessage("e4", "verbatim tail"),
+			];
+			const ctx = {
+				hasUI: false,
+				cwd,
+				sessionManager: { getBranch: () => branch, getEntries: () => branch },
+			};
+			const result = (await handlers["session_before_compact"](
+				{ preparation: { firstKeptEntryId: "e3", tokensBefore: 1000 } },
+				ctx,
+			)) as {
+				compaction?: { summary?: string };
+			} | void;
+
+			const summary = result?.compaction?.summary ?? "";
+			expect(summary.length).toBeGreaterThan(0);
+			// End-to-end: the marker comes through the REAL hook path (fold.gaps → render).
+			expect(summary).toContain("⚠ UNOBSERVED WINDOW [e2..e3]");
+			// Exactly one marker: the attempts:0 gap is silent (no marker for [start..e1]).
+			const markers = summary.match(/⚠ UNOBSERVED WINDOW/g) ?? [];
+			expect(markers).toHaveLength(1);
+			expect(summary).not.toContain("[start..e1]");
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}

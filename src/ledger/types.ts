@@ -34,6 +34,16 @@ export const OM_RESUME = "om.resume";
  * Corrections are never deletions (L4): both members stay in the buffer and render adjacent.
  */
 export const OM_OBSERVATIONS_SUPERSEDED = "om.observations.superseded";
+/**
+ * Chunk-coverage gap markers (§2.4, P3.1) — the no-silent-holes contract (L5):
+ * - `attempts: 0`: a clean zero-observation chunk — semantically "acknowledged, nothing to
+ *   record" (the validator forbids empty `recorded` entries). Silent in render.
+ * - `attempts: 2`: the give-up marker after the bounded retry budget (L9); renders as an
+ *   `⚠ UNOBSERVED WINDOW` line.
+ * Either way a gap IS an ack for the flush-ack gate (P3.2): its `coversUpToId` covers the
+ * chunk range `[afterEntryId .. coversUpToId]`.
+ */
+export const OM_OBSERVATIONS_GAP = "om.observations.gap";
 
 export type Entry = {
 	type: string;
@@ -111,6 +121,19 @@ export type ObservationsSupersededEntryData = {
 	coversUpToId: string;
 };
 
+export type ObservationsGapEntryData = {
+	/** Chunk start (previous coverage marker). Absent for the very first chunk. */
+	afterEntryId?: string;
+	/** Chunk end — the coverage marker (inclusive), same semantics as recorded entries. */
+	coversUpToId: string;
+	/** 0 = clean empty chunk (silent ack); 2 = retry budget exhausted (give-up). */
+	attempts: number;
+	lastError?: string;
+};
+
+/** §2.3 render input alias — `gaps: Gap[]` (fold exposes these in branch order). */
+export type Gap = ObservationsGapEntryData;
+
 export type CostEntryData = {
 	costUsd: number;
 	role: "observer" | "consolidator";
@@ -124,7 +147,10 @@ export type MemoryDetails = {
 	observations: Observation[];
 };
 
-export type MemoryCustomType = typeof OM_OBSERVATIONS_RECORDED | typeof OM_OBSERVATIONS_DROPPED;
+export type MemoryCustomType =
+	| typeof OM_OBSERVATIONS_RECORDED
+	| typeof OM_OBSERVATIONS_DROPPED
+	| typeof OM_OBSERVATIONS_GAP;
 
 export function isNonEmptyString(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0;
@@ -187,6 +213,19 @@ export function isObservationsSupersededData(value: unknown): value is Observati
 		value.pairs.length > 0 &&
 		value.pairs.every(isSupersessionPair) &&
 		isNonEmptyString(value.coversUpToId)
+	);
+}
+
+/** Strict-when-present, lenient-when-absent (C5): optional fields validate only if given. */
+export function isObservationsGapData(value: unknown): value is ObservationsGapEntryData {
+	if (!isPlainRecord(value)) return false;
+	if (value.afterEntryId !== undefined && !isNonEmptyString(value.afterEntryId)) return false;
+	if (value.lastError !== undefined && typeof value.lastError !== "string") return false;
+	return (
+		isNonEmptyString(value.coversUpToId) &&
+		typeof value.attempts === "number" &&
+		Number.isInteger(value.attempts) &&
+		value.attempts >= 0
 	);
 }
 

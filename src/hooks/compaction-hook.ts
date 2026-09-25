@@ -285,6 +285,10 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 				candidates,
 				observations: projection.observations,
 				supersessions: folded.supersessions,
+				// P3.1: gap entries feed the [8] UNOBSERVED WINDOW markers (attempts:2)
+				// and stay silent for attempts:0 (§2.4). End-to-end wiring — without this
+				// line the markers are unreachable from the production render path.
+				gaps: folded.gaps,
 				observationMeta,
 				strats: listStrats(runtime.memoryRoot),
 				openLoops: state ? extractOpenLoops(state.body) : undefined,

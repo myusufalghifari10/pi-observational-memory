@@ -193,6 +193,207 @@ describe("P2.5 §2.6 section [5] — top-k, exclusion, omission, budget", () => 
 	});
 });
 
+// NOTE (BLOCKED run): the "fills to TOP_K" and "surfaces in [5] WHOLE" tests below are
+// INTENTIONAL reproducers of a src/ledger/render.ts defect (teaserBudget is structurally
+// smaller than any evicted unit's cost — see p3a1-fixab-tests.md). They fail until src is
+// fixed; the other three tests in this block pass today.
+describe("P3a Fix A / Fix B — exclude-then-cap and belief-group teasers (§2.6)", () => {
+	const zebraMeta = (overrides: Partial<LineMeta> = {}): LineMeta => meta({ ...overrides });
+
+	it("Fix A: with [6]-admitted lines excluded first, [5] still fills to TOP_K from the remainder", () => {
+		// 8 singleton observations all match the query; [6] admits exactly the two
+		// highest-ranked (budget 25 ⇒ 20 used, each remaining unit costs 10 > 5).
+		// Exclude-then-cap: the 6 remainder teasers rank on their own, top-5 renders
+		// (obs3..obs7 by id tie-break); the [6]-bound obs1/obs2 never waste a rank slot.
+		const observations: Observation[] = Array.from({ length: 8 }, (_, index) =>
+			observation(at(index + 1), {
+				content: `zebra fact number ${index + 1}`,
+				tokenCount: 10,
+				kind: "assertion",
+				sourceEntryId: "e1",
+			}),
+		);
+		const observationMeta = new Map<string, LineMeta>(
+			observations.map((obs) => [obs.timestamp, zebraMeta()]),
+		);
+		const { summary } = renderSummaryV2({
+			state: { body: "## Goal\nZoology." },
+			query: "zebra",
+			observations,
+			observationMeta,
+			budget: 25,
+		});
+		const body = section(summary, "## Relevant memory");
+		expect(body).toBeDefined();
+		const lines = (body as string).split("\n");
+		expect(lines).toHaveLength(RELEVANT_TOP_K); // fills to 5 from the remainder
+		// Excluded lines (in [6]) never appear in [5]: one render each, in [6].
+		expect(body).not.toContain(observations[0].timestamp);
+		expect(body).not.toContain(observations[1].timestamp);
+		// Rank tie ⇒ id asc among the remainder: obs3..obs7, obs8 cut by the cap.
+		expect(lines).toEqual(
+			observations.slice(2, 7).map((obs) => `${obs.timestamp}  ${obs.content}`),
+		);
+		// The 2 excluded lines DID make [6].
+		const admittedIds = summary.split("## Observations\n")[1]
+			? summary.split("## Observations\n")[1].split("\n")[0]
+			: undefined;
+		expect(admittedIds).toContain(observations[0].timestamp);
+	});
+
+	it("Fix A: deduped observation lines reserve NO budget — [5] never shrinks [6]", () => {
+		const observations: Observation[] = [1, 2, 3].map((second) =>
+			observation(at(second), {
+				content: `zebra checklist item ${second}`,
+				tokenCount: 10,
+				kind: "assertion",
+				sourceEntryId: "e1",
+			}),
+		);
+		const observationMeta = new Map<string, LineMeta>(
+			observations.map((obs) => [obs.timestamp, zebraMeta()]),
+		);
+		const withQuery = renderSummaryV2({
+			state: { body: "## Goal\nZoology." },
+			query: "zebra",
+			observations,
+			observationMeta,
+			budget: 30,
+		});
+		const control = renderSummaryV2({
+			state: { body: "## Goal\nZoology." },
+			observations,
+			observationMeta,
+			budget: 30,
+		});
+		// All three make [6] with the query present — identical to the no-query control:
+		// deduped lines (bound for [6]) reserve nothing, so [6]'s capacity is untouched.
+		const admitted = (result: { packExplain: { lines: { id: string; admitted: boolean }[] } }) =>
+			result.packExplain.lines.filter((line) => line.admitted).map((line) => line.id).sort();
+		expect(admitted(withQuery)).toEqual(admitted(control));
+		expect(admitted(withQuery)).toHaveLength(3);
+		expect(section(withQuery.summary, "## Relevant memory")).toBeUndefined(); // all in [6], no teaser
+	});
+
+	it("Fix A: only ADMITTED [5] lines reserve budget — an evicted topic frees its tokens for [6]", () => {
+		// Three topics match (score tie ⇒ id asc): a(6) + b(6) admitted, c(12) evicted
+		// under budget 20 ⇒ topicTokens = 12 ⇒ [6] gets 8 ⇒ the 8-token observation fits.
+		// If an evicted topic still reserved its tokens, [6] would get ≤0 and the obs evicts.
+		const topics = [
+			candidate("topic:a.md", "topic alpha zebra facts", 6),
+			candidate("topic:b.md", "topic beta zebra facts", 6),
+			candidate("topic:c.md", "topic gamma zebra facts", 12),
+		];
+		const obs = observation(at(1), {
+			content: "zebra hull integrity check",
+			tokenCount: 8,
+			kind: "assertion",
+			sourceEntryId: "e1",
+		});
+		const observationMeta = new Map<string, LineMeta>([[obs.timestamp, zebraMeta({ tokenCount: 8 })]]);
+		const { summary, packExplain } = renderSummaryV2({
+			state: { body: "## Goal\nZoology." },
+			query: "zebra",
+			candidates: topics,
+			observations: [obs],
+			observationMeta,
+			budget: 20,
+		});
+		const body = section(summary, "## Relevant memory");
+		expect(body).toBeDefined();
+		expect(body).toContain("topic alpha zebra facts");
+		expect(body).toContain("topic beta zebra facts");
+		expect(body).not.toContain("topic gamma zebra facts"); // evicted ⇒ reserves nothing
+		// [6] received exactly budget − admittedTopics = 20 − 12 = 8 ⇒ the obs is admitted.
+		expect(packExplain.lines.find((line) => line.id === obs.timestamp)).toMatchObject({
+			admitted: true,
+			reason: "packed",
+		});
+	});
+
+	it("Fix B: a belief group evicted from [6] surfaces in [5] WHOLE — believed:/now: partners adjacent", () => {
+		const loser = observation(at(1), {
+			content: "zebra habitat is restored",
+			tokenCount: 10,
+			kind: "assertion",
+			sourceEntryId: "e1",
+		});
+		const winner = observation(at(2), {
+			content: "zebra habitat is relocated",
+			tokenCount: 10,
+			kind: "event",
+			sourceEntryId: "e2",
+		});
+		const soaker = observation(at(3), {
+			content: "deploy pipeline ready",
+			tokenCount: 10,
+			kind: "assertion",
+			sourceEntryId: "e3",
+		});
+		const observationMeta = new Map<string, LineMeta>([
+			[loser.timestamp, zebraMeta({ kind: "event" })], // unit score = winner's = 0.05
+			[winner.timestamp, zebraMeta({ kind: "event" })],
+			[soaker.timestamp, zebraMeta({ provenance: "user-asserted" })], // 0.12 ranks first
+		]);
+		// budget 25: soaker (10) admitted, group (20) cannot fit (30 > 25) ⇒ evicted from [6].
+		const { summary, packExplain } = renderSummaryV2({
+			state: { body: "## Goal\nZoology." },
+			query: "zebra",
+			observations: [loser, winner, soaker],
+			supersessions: new Map([[loser.timestamp, winner.timestamp]]),
+			observationMeta,
+			budget: 25,
+		});
+		// The group really is outside [6]…
+		expect(packExplain.lines.find((line) => line.id === loser.timestamp)?.admitted).toBe(false);
+		expect(packExplain.lines.find((line) => line.id === winner.timestamp)?.admitted).toBe(false);
+		// …so [5] surfaces it WHOLE: both partners adjacent, never a bare member.
+		const body = section(summary, "## Relevant memory");
+		expect(body).toBeDefined();
+		const lines = (body as string).split("\n");
+		expect(lines).toEqual([
+			`${loser.timestamp}  believed: ${loser.content}`,
+			`${winner.timestamp}  now: ${winner.content}`,
+		]);
+	});
+
+	it("Fix B: a belief group admitted to [6] never re-surfaces bare in [5]", () => {
+		const loser = observation(at(1), {
+			content: "zebra habitat is restored",
+			tokenCount: 10,
+			kind: "assertion",
+			sourceEntryId: "e1",
+		});
+		const winner = observation(at(2), {
+			content: "zebra habitat is relocated",
+			tokenCount: 10,
+			kind: "assertion",
+			sourceEntryId: "e2",
+		});
+		const observationMeta = new Map<string, LineMeta>([
+			[loser.timestamp, zebraMeta()],
+			[winner.timestamp, zebraMeta()],
+		]);
+		const { summary, packExplain } = renderSummaryV2({
+			state: { body: "## Goal\nZoology." },
+			query: "zebra",
+			observations: [loser, winner],
+			supersessions: new Map([[loser.timestamp, winner.timestamp]]),
+			observationMeta,
+			budget: 100,
+		});
+		// Group admitted to [6] as one unit…
+		expect(packExplain.lines.find((line) => line.id === loser.timestamp)?.admitted).toBe(true);
+		expect(packExplain.lines.find((line) => line.id === winner.timestamp)?.admitted).toBe(true);
+		// …and rendered exactly once total (in [6]); [5] has no teaser of it.
+		const loserLine = `${loser.timestamp}  believed: ${loser.content}`;
+		const winnerLine = `${winner.timestamp}  now: ${winner.content}`;
+		expect(summary.split(loserLine)).toHaveLength(2);
+		expect(summary.split(winnerLine)).toHaveLength(2);
+		expect(section(summary, "## Relevant memory")).toBeUndefined();
+	});
+});
+
 describe("P2.5 hook capture — lastUserQuery + buildRelevantCandidates", () => {
 	it("picks the NEWEST user/custom_message and skips hidden om.* synthetics", () => {
 		const branch: TestEntry[] = [
@@ -232,3 +433,4 @@ describe("P2.5 hook capture — lastUserQuery + buildRelevantCandidates", () => 
 		}
 	});
 });
+

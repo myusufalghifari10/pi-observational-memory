@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { foldLedger } from "../src/ledger/index.js";
+import { foldLedger, isObservationsGapData, OM_OBSERVATIONS_GAP } from "../src/ledger/index.js";
 import {
 	branchSummary,
 	observation,
@@ -147,5 +147,62 @@ describe("foldLedger (minimal schema, timestamp-keyed)", () => {
 		const folded = foldLedger(entries);
 
 		expect(folded.observations).toEqual([]);
+	});
+});
+
+// ─── P3.1 (§2.4) — om.observations.gap: validator + fold.gaps ───
+
+describe("P3.1 gap entries (validator + fold.gaps)", () => {
+	/** Local builder: fixtures/session.ts is out of scope for this phase's authority. */
+	function gapEntry(
+		id: string,
+		data: Record<string, unknown>,
+	): { type: string; id: string; customType: string; data: unknown; parentId: null; timestamp: string } {
+		return {
+			type: "custom",
+			id,
+			parentId: null,
+			timestamp: "2026-09-25T10:00:00",
+			customType: OM_OBSERVATIONS_GAP,
+			data,
+		};
+	}
+
+	it("isObservationsGapData accepts the two locked shapes and rejects malformed ones", () => {
+		// attempts:0 — the clean empty-chunk ack (§2.4 locked solution).
+		expect(isObservationsGapData({ coversUpToId: "raw-4", attempts: 0, lastError: "no observations extracted" })).toBe(true);
+		// attempts:2 — the give-up marker; afterEntryId absent for the very first chunk.
+		expect(isObservationsGapData({ coversUpToId: "raw-4", attempts: 2, lastError: "observer exited with code 1" })).toBe(true);
+		// with a start id
+		expect(isObservationsGapData({ afterEntryId: "raw-1", coversUpToId: "raw-4", attempts: 2 })).toBe(true);
+
+		expect(isObservationsGapData(undefined)).toBe(false);
+		expect(isObservationsGapData("gap")).toBe(false);
+		expect(isObservationsGapData({ attempts: 2 })).toBe(false); // missing coversUpToId
+		expect(isObservationsGapData({ coversUpToId: "raw-4", attempts: -1 })).toBe(false);
+		expect(isObservationsGapData({ coversUpToId: "raw-4", attempts: 1.5 })).toBe(false);
+		expect(isObservationsGapData({ coversUpToId: "raw-4", attempts: "two" })).toBe(false);
+		expect(isObservationsGapData({ coversUpToId: "raw-4", attempts: 2, afterEntryId: 42 })).toBe(false); // strict-when-present
+		expect(isObservationsGapData({ coversUpToId: "raw-4", attempts: 2, lastError: 7 })).toBe(false);
+	});
+
+	it("fold.gaps collects valid gaps in branch order (attempts 0 and 2 alike) and skips invalid data", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			gapEntry("gap-1", { coversUpToId: "raw-1", attempts: 0, lastError: "no observations extracted" }),
+			textCustomMessage("raw-2", "bbbb"),
+			gapEntry("gap-2", { afterEntryId: "raw-1", coversUpToId: "raw-2", attempts: 2, lastError: "boom" }),
+			gapEntry("gap-3", { coversUpToId: "" }), // invalid: empty coversUpToId
+		];
+
+		const folded = foldLedger(entries);
+
+		expect(folded.gaps).toHaveLength(2);
+		expect(folded.gaps[0]).toMatchObject({ coversUpToId: "raw-1", attempts: 0 });
+		expect(folded.gaps[1]).toMatchObject({ afterEntryId: "raw-1", coversUpToId: "raw-2", attempts: 2 });
+		// Branch-local like every other fold surface: nothing past the fold boundary
+		// (the boundary cuts at raw-1, so gap-1 — which sits after it — is excluded).
+		const bounded = foldLedger(entries, { upToEntryId: "raw-1" });
+		expect(bounded.gaps).toEqual([]);
 	});
 });
