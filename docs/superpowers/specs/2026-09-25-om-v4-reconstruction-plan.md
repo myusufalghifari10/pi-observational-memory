@@ -66,7 +66,7 @@ beyond `/om:status` telemetry additions.
 | L9 | **Gap entries replace silent slice drops.** `recordSliceFailure` at attempt cap appends `om.observations.gap` instead of dropping silently. | Fixes the audit finding "silent memory hole after retry cap" at the architecture level. |
 | L10 | **Secret redaction at the two egress points**: (a) worker chunk text, (b) observation content at commit. Regex-based, model-free. | Observations persist verbatim today; security is non-negotiable. |
 | L11 | **Destructive defaults are conservative.** No on-disk file is ever deleted by the render; anergy stays demote-never-delete; DEATHS entries get revocation conditions instead of permanence. | Safety. |
-| L12 | **Compaction policy:** `compactAtContextTokens` default changes to **64_000** in `DEFAULTS` (frequency flip — lossless render makes frequent compaction cheap). Explicit user config always wins (the current user config of 262k stays until they change it). `tailTokens` default stays 30_000. | User delegated frequency; quality-per-moment is the priority. |
+| L12 | **Compaction policy:** `compactAtContextTokens` default changes to **64_000** in `DEFAULTS` (frequency flip — lossless render makes frequent compaction cheap). Explicit user config always wins (the current user config of 262k stays until they change it). `tailTokens` default stays 20_000 (as shipped in `src/config.ts:62`; the earlier 30_000 draft figure was never implemented). | User delegated frequency; quality-per-moment is the priority. |
 
 ---
 
