@@ -211,37 +211,44 @@ cd pi-observational-memory
 sh scripts/install.sh
 ```
 
-The script checks prerequisites, installs dev dependencies, typechecks, and registers the repo in the `extensions` array of `~/.pi/agent/settings.json` (a `.bak` backup is written; the run is idempotent).
+The script checks prerequisites, installs dev dependencies, typechecks, registers the repo in the `packages` array of `~/.pi/agent/settings.json`, and seeds an `observational-memory` config block **if you don't have one** (an existing config is never touched; a `.bak` backup is written; the run is idempotent).
 
 - `sh scripts/install.sh --test` — also run the full test suite before registering
 - `sh scripts/install.sh --no-register` — install only, and print the line to add manually
 
-Manual alternative: `npm install`, then add the absolute clone path to the `extensions` array in `~/.pi/agent/settings.json`. Either way, **restart pi**, then run `/om on`.
+Manual alternative: `npm install`, then add the absolute clone path to the `packages` array in `~/.pi/agent/settings.json`. Either way, **restart pi**, then run `/om on`.
 
 ## Configuration
 
-All settings live under the `observational-memory` key — global `~/.pi/agent/settings.json`, optionally overridden per project in `<project>/.pi/settings.json` (per-field merge: project → global → defaults). These are the **actual defaults** from `src/config.ts`:
+All settings live under the `observational-memory` key — global `~/.pi/agent/settings.json`, optionally overridden per project in `<project>/.pi/settings.json` (per-field merge: project → global → defaults). **`scripts/install.sh` seeds this spec block** — the tuned setup this repo is developed and verified on (1M-context, long-horizon work):
 
 ```json
 "observational-memory": {
-  "chunkTokens": 10000,
+  "chunkTokens": 15000,
   "chunkOverlapTokens": 0,
-  "poolTargetTokens": 10000,
-  "consolidateAtPoolTokens": 15000,
-  "compactAtContextTokens": 64000,
-  "tailTokens": 20000,
+  "poolTargetTokens": 12000,
+  "consolidateAtPoolTokens": 20000,
+  "compactAtContextTokens": 264000,
+  "tailTokens": 30000,
   "journeyTargetTokens": 1000,
   "observerConcurrency": 4,
   "serialWorkers": false,
   "resumeAfterMidRunCompaction": true,
-  "models": {
-    "observer":     { "provider": "openrouter", "id": "z-ai/glm-5.3", "thinking": "low" },
-    "consolidator": { "provider": "openrouter", "id": "z-ai/glm-5.3", "thinking": "medium" }
-  },
   "passive": false,
   "debugLog": false
 }
 ```
+
+Workers run on whatever model you point them at — add a `models` block only if you don't want the built-in default worker model (any provider, any model; the shape is all that matters):
+
+```json
+"models": {
+  "observer":     { "provider": "<provider>", "id": "<model>", "thinking": "low" },
+  "consolidator": { "provider": "<provider>", "id": "<model>", "thinking": "medium" }
+}
+```
+
+Built-in code defaults (`src/config.ts`, used for any field you don't set) differ from the spec block above in: `chunkTokens` 10_000, `poolTargetTokens` 10_000, `consolidateAtPoolTokens` 15_000, `compactAtContextTokens` 64_000, `tailTokens` 20_000 — everything else matches. Tune the knobs to your window: the compaction threshold is "how stale the rehydrated block may get", the tail is "how much raw conversation survives next to it".
 
 - `serialWorkers: true` = one worker at a time (use `/om-sequential`; made for local models).
 - `passive: true` (or env `PI_OM_PASSIVE=true`) is a kill-switch that suppresses all triggering.

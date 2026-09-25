@@ -75,19 +75,63 @@ const settingsPath = path.join(process.env.HOME, ".pi", "agent", "settings.json"
 const repoRoot = process.cwd();
 let settings = {};
 try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch { /* first run: keep {} */ }
+
+// Registration lives in the "packages" array (a pi package resolves its entry from
+// package.json "pi.extensions"). Older revisions of this script pushed the repo dir
+// into "extensions" — migrate that entry so the result matches a working setup.
+const packages = Array.isArray(settings.packages) ? settings.packages : [];
 const extensions = Array.isArray(settings.extensions) ? settings.extensions : [];
+let changed = false;
 if (extensions.includes(repoRoot)) {
-  console.log("already registered in " + settingsPath);
-  process.exit(0);
+  settings.extensions = extensions.filter((entry) => entry !== repoRoot);
+  changed = true;
 }
-fs.copyFileSync(settingsPath, settingsPath + ".bak");
-extensions.push(repoRoot);
-settings.extensions = extensions;
-fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-console.log("registered in " + settingsPath + " (backup: settings.json.bak)");
+if (!packages.includes(repoRoot)) {
+  packages.push(repoRoot);
+  settings.packages = packages;
+  changed = true;
+}
+
+// Seed the spec config block ONLY when the key is absent — an existing
+// "observational-memory" block (e.g. a tuned live setup) is never touched.
+// No "models" is seeded on purpose: any provider/model works, and an unset
+// models.* falls back to the built-in default worker model.
+const SPEC = {
+  chunkTokens: 15000,
+  chunkOverlapTokens: 0,
+  poolTargetTokens: 12000,
+  consolidateAtPoolTokens: 20000,
+  compactAtContextTokens: 264000,
+  tailTokens: 30000,
+  journeyTargetTokens: 1000,
+  observerConcurrency: 4,
+  serialWorkers: false,
+  resumeAfterMidRunCompaction: true,
+  passive: false,
+  debugLog: false
+};
+let seededConfig = false;
+if (settings["observational-memory"] === undefined) {
+  settings["observational-memory"] = SPEC;
+  seededConfig = true;
+  changed = true;
+}
+
+if (changed) {
+  fs.copyFileSync(settingsPath, settingsPath + ".bak");
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  console.log("registered in " + settingsPath + " (backup: settings.json.bak)");
+} else {
+  console.log("already registered in " + settingsPath);
+}
+if (seededConfig) {
+  console.log("seeded 'observational-memory' config (spec values; add a 'models' block to pick your worker model)");
+} else if (settings["observational-memory"] !== undefined) {
+  console.log("existing 'observational-memory' config left untouched");
+}
 EOF
 else
-  say "skipped registration — add this to the extensions array in ~/.pi/agent/settings.json:"
+  say "skipped registration — add this to the packages array in ~/.pi/agent/settings.json:"
   say "  \"$REPO_ROOT\""
 fi
 
@@ -97,3 +141,4 @@ say "  1. restart pi (a new session picks up the extension)"
 say "  2. inside pi run:  /om on      # observational memory is OFF by default"
 say "  3. inspect anytime: /om:status"
 say "config lives under the 'observational-memory' key in ~/.pi/agent/settings.json"
+say "(seeded with the spec values on first install — add a 'models' block there to pick your worker model)"
