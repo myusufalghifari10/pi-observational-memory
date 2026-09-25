@@ -10,37 +10,48 @@ describe("bridgeContextBlock", () => {
 		expect(bridgeContextBlock([])).toBeUndefined();
 	});
 
-	it("includes every observation when at or below the tail cap", () => {
+	it("includes every observation when at or below the tail cap (partial buffer never errors)", () => {
 		const block = bridgeContextBlock([obs("2026-09-21T01:00:00", "alpha"), obs("2026-09-21T02:00:00", "beta")]);
 		expect(block).toContain("alpha");
 		expect(block).toContain("beta");
 	});
 
+	it("holds all 7 observations of a nearly-full buffer (one below BRIDGE_TAIL=8)", () => {
+		// Fresh-session safety (user requirement): a session with fewer observations than
+		// BRIDGE_TAIL must render every one of them — slice takes what exists, never throws.
+		const input = Array.from({ length: 7 }, (_, i) =>
+			obs(`2026-09-21T0${i + 1}:00:00`, `fact-${i + 1}`),
+		);
+		const block = bridgeContextBlock(input)!;
+		for (let i = 1; i <= 7; i++) expect(block).toContain(`fact-${i}`);
+	});
+
 	it("caps at the BRIDGE_TAIL most recent observations, sorted chronologically", () => {
-		// Deliberately unsorted input; output must be the 5 newest in chronological order.
+		// Deliberately unsorted input; output must be the 8 newest in chronological order.
 		const input = [
-			obs("2026-09-21T07:00:00", "seven"),
+			obs("2026-09-21T10:00:00", "ten"),
 			obs("2026-09-21T01:00:00", "zebra"),
 			obs("2026-09-21T03:00:00", "three"),
 			obs("2026-09-21T05:00:00", "five"),
 			obs("2026-09-21T02:00:00", "yak"),
 			obs("2026-09-21T06:00:00", "six"),
 			obs("2026-09-21T04:00:00", "four"),
+			obs("2026-09-21T08:00:00", "eight"),
+			obs("2026-09-21T07:00:00", "seven"),
+			obs("2026-09-21T09:00:00", "nine"),
 		];
 		const block = bridgeContextBlock(input)!;
-		expect(block).toContain("three");
-		expect(block).toContain("four");
-		expect(block).toContain("five");
-		expect(block).toContain("six");
-		expect(block).toContain("seven");
+		for (const name of ["three", "four", "five", "six", "seven", "eight", "nine", "ten"]) {
+			expect(block).toContain(name);
+		}
 		expect(block).not.toContain("zebra");
 		expect(block).not.toContain("yak");
-		// Chronological order inside the block: three < four < five < six < seven.
-		expect(block.indexOf("three")).toBeLessThan(block.indexOf("four"));
-		expect(block.indexOf("four")).toBeLessThan(block.indexOf("five"));
-		expect(block.indexOf("five")).toBeLessThan(block.indexOf("six"));
-		expect(block.indexOf("six")).toBeLessThan(block.indexOf("seven"));
-		expect(BRIDGE_TAIL).toBe(5);
+		// Chronological order inside the block: three < four < … < nine < ten.
+		const names = ["three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+		for (let i = 1; i < names.length; i++) {
+			expect(block.indexOf(names[i - 1]!)).toBeLessThan(block.indexOf(names[i]!));
+		}
+		expect(BRIDGE_TAIL).toBe(8);
 	});
 
 	it("fences the block and carries the reference-only instruction", () => {

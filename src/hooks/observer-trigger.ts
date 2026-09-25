@@ -348,7 +348,7 @@ export function evaluateObserverTriggers(pi: ExtensionAPI, runtime: Runtime, ctx
 }
 
 /** Max observations from the existing buffer shown to the next observer as reference context. */
-export const BRIDGE_TAIL = 5;
+export const BRIDGE_TAIL = 8;
 
 /**
  * Fence the last few buffer observations as read-only reference context for the next
