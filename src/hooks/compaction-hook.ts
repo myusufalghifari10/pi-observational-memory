@@ -2,17 +2,17 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { logIfEnabled } from "../debug-log.js";
 import { renderMemoryMap } from "../memory/index-render.js";
 import { checkAnergy } from "../memory/anergy.js";
-import { listStrats, listTopics, readJourney, readState } from "../memory/paths.js";
+import { listStrats, listTopics, parseDeaths, readDeaths, readJourney, readState } from "../memory/paths.js";
 import { resolve } from "node:path";
 import type { Runtime } from "../runtime.js";
 import {
+	ackedChunkBoundaryIndices,
 	buildCompactionProjection,
 	buildLineMeta,
 	deriveProvenance,
 	entryIndexById,
 	extractOpenLoops,
 	foldLedger,
-	isObservationsRecordedEntry,
 	isSourceEntry,
 	isValidCutPoint,
 	rawTokensAfterIndex,
@@ -26,18 +26,6 @@ import {
 import { estimateStringTokens } from "../tokens.js";
 import type { Topic } from "../memory/paths.js";
 
-/** Distinct, branch-resolved coversUpToId indices of committed observation chunks, ascending. */
-function chunkBoundaryIndices(branch: Entry[]): number[] {
-	const indexes = entryIndexById(branch);
-	const set = new Set<number>();
-	for (const entry of branch) {
-		if (!isObservationsRecordedEntry(entry)) continue;
-		const idx = indexes.get(entry.data.coversUpToId);
-		if (idx !== undefined) set.add(idx);
-	}
-	return Array.from(set).sort((a, b) => a - b);
-}
-
 /** First source entry after `boundaryIndex` that is a valid cut point, or undefined. */
 function firstKeptAfterBoundary(branch: Entry[], boundaryIndex: number): Entry | undefined {
 	for (let i = boundaryIndex + 1; i < branch.length; i++) {
@@ -48,18 +36,19 @@ function firstKeptAfterBoundary(branch: Entry[], boundaryIndex: number): Entry |
 }
 
 /**
- * Snap pi's proposed `firstKeptEntryId` to an observation chunk boundary so the verbatim tail
- * starts exactly where a chunk ends — no chunk straddles the cutoff, so nothing is both
- * rendered into the summary and kept verbatim (and nothing is lost). Among boundaries whose
- * next entry is a valid cut point, pick the one whose resulting tail is closest to
- * `tailTokens`. Falls back to pi's proposal when no boundary qualifies (`tail` undefined).
+ * Snap pi's proposed `firstKeptEntryId` to a FLUSH-ACKED observation chunk boundary so
+ * the verbatim tail starts exactly where an acknowledged chunk ends — no chunk straddles
+ * the cutoff, and (P3.2 gate, §2.4) no unflushed chunk can be evicted: boundaries without
+ * a recorded/gap commit covering them are ineligible. Among eligible boundaries whose next
+ * entry is a valid cut point, pick the one whose resulting tail is closest to `tailTokens`.
+ * Falls back to pi's proposed cutoff ONLY when no acked boundary qualifies.
  */
 export function snapCutoff(
 	branch: Entry[],
 	proposedFirstKeptId: string,
 	tailTokens: number,
 ): { firstKeptId: string; tail: number | undefined } {
-	const boundaries = chunkBoundaryIndices(branch);
+	const boundaries = ackedChunkBoundaryIndices(branch);
 	let bestId: string | undefined;
 	let bestTail: number | undefined;
 	let bestDelta = Number.POSITIVE_INFINITY;
@@ -266,8 +255,13 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			// Anergy: model-free memory-vs-repo drift check, recomputed per render and never
 			// persisted. On-disk topic files stay untouched — only this injected map flags drift.
 			const topics = listTopics(runtime.memoryRoot);
-			const anergy = checkAnergy(topics, resolve(runtime.memoryRoot, "..", ".."), projection.observations);
-			const map = renderMemoryMap(topics, anergy);
+			const projectCwd = resolve(runtime.memoryRoot, "..", "..");
+			const anergy = checkAnergy(topics, projectCwd, projection.observations);
+			// P4.1: DEATHS.md lines join section [4]; `(verify:)` failures demote to a
+			// possibly-revived stub (L11 — render never touches the file itself).
+			const deathBody = readDeaths(runtime.memoryRoot);
+			const deaths = deathBody ? { entries: parseDeaths(deathBody), projectCwd } : undefined;
+			const map = renderMemoryMap(topics, anergy, deaths);
 			// §2.3 block layout via renderSummaryV2 (P2.3: knapsack-packed, L6 fallback).
 			// Supersession pairs come from the FULL-branch fold: belief units only pair
 			// entries that are both present in the projection, so a winner outside the
@@ -293,10 +287,14 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 				strats: listStrats(runtime.memoryRoot),
 				openLoops: state ? extractOpenLoops(state.body) : undefined,
 			});
+			// P5.2: derive the pack counts once — the debugLog event AND the details.render
+			// stamp read the same numbers (the stamp is what /om:status surfaces later).
+			const packedCount = packExplain.lines.filter((line) => line.admitted).length;
+			const evictedCount = packExplain.lines.length - packedCount;
 			logIfEnabled(runtime.config.debugLog, "render.pack", {
 				fallback: packExplain.fallback,
-				admitted: packExplain.lines.filter((line) => line.admitted).length,
-				evicted: packExplain.lines.filter((line) => !line.admitted).length,
+				admitted: packedCount,
+				evicted: evictedCount,
 				lines: packExplain.lines,
 			});
 
@@ -305,7 +303,12 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 					summary,
 					firstKeptEntryId: snapped,
 					tokensBefore,
-					details: projection.details,
+					// P5.2 stamp: packed/evicted ride into the compaction entry's details so
+					// /om:status can read them from durable state (no new persistence).
+					details: {
+						...projection.details,
+						render: { packed: packedCount, evicted: evictedCount },
+					},
 				},
 			};
 		} finally {

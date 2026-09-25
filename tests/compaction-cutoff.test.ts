@@ -4,6 +4,7 @@ import { buildCompactionProjection, renderSummary } from "../src/ledger/index.js
 import { canSkipObserverWait, snapCutoff, snapFirstKeptEntryId } from "../src/hooks/compaction-hook.js";
 import {
 	observation,
+	observationsDroppedEntry,
 	observationsRecordedEntry,
 	rawMessage,
 	toolResultMessage,
@@ -121,5 +122,102 @@ describe("cutoff ↔ projection integration (no double representation)", () => {
 		const summary = renderSummary(undefined, undefined, projection.observations);
 		expect(summary).toContain("2026-05-02T10:00:01  early");
 		expect(summary).toContain("2026-05-02T10:05:00  late");
+	});
+});
+
+// ── P3.2 flush-ack gate (§2.4) ────────────────────────────────────────────────
+// Local builders: fixtures/session.ts is out of scope for this task's authority.
+function gapEntry(
+	id: string,
+	data: Record<string, unknown>,
+): { type: string; id: string; customType: string; data: unknown; parentId: null; timestamp: string } {
+	return {
+		type: "custom",
+		id,
+		parentId: null,
+		timestamp: "2026-09-25T10:00:00",
+		customType: "om.observations.gap",
+		data,
+	};
+}
+
+describe("P3.2 flush-ack gate (§2.4)", () => {
+	it("(a) refuses a boundary whose chunk has no flush ack (dropped coverage only)", () => {
+		// Coverage candidates: dropped(covers raw-2) is the consolidator's tip-at-consolidation
+		// watermark — NOT flush evidence — so the raw-2 boundary must be REFUSED. The recorded
+		// raw-4 boundary is the only eligible one.
+		const branch = [
+			rawMessage("raw-1", body),
+			rawMessage("raw-2", body),
+			observationsDroppedEntry("drop-1", { observationTimestamps: ["2026-05-02T10:00:01"], coversUpToId: "raw-2" }),
+			rawMessage("raw-3", body),
+			rawMessage("raw-4", body),
+			observationsRecordedEntry("om-1", { observations: [observation("2026-05-02T10:05:00")], coversUpToId: "raw-4" }),
+			rawMessage("raw-5", body),
+		];
+
+		// tailTokens 30 exactly matches the tail after raw-2 — without the gate the snapper
+		// would pick the REFUSED boundary (firstKept raw-3). With the gate only raw-4 qualifies.
+		expect(snapFirstKeptEntryId(branch, "raw-5", 30)).toBe("raw-5");
+		// Explicit refusal assertion: the refused boundary's firstKept is never returned.
+		expect(snapFirstKeptEntryId(branch, "raw-5", 30)).not.toBe("raw-3");
+	});
+
+	it("(b) accepts a gap-acked boundary (attempts:2 give-up chunk) — gap variant", () => {
+		// The chunk ending at raw-2 was ACKNOWLEDGED by an om.observations.gap entry:
+		// it is a legal stop even though no om.observations.recorded covers it.
+		const branch = [
+			rawMessage("raw-1", body),
+			rawMessage("raw-2", body),
+			gapEntry("gap-1", { afterEntryId: "raw-1", coversUpToId: "raw-2", attempts: 2, lastError: "observer exited 1" }),
+			rawMessage("raw-3", body),
+			rawMessage("raw-4", body),
+		];
+
+		// Pre-gate: boundaries come from recorded entries only → none → pi's proposal raw-4.
+		// Post-gate: the gap boundary at raw-2 is accepted → firstKept raw-3.
+		expect(snapFirstKeptEntryId(branch, "raw-4", 5)).toBe("raw-3");
+	});
+
+	it("(b) accepts a recorded-acked boundary — recorded variant", () => {
+		const branch = [
+			rawMessage("raw-1", body),
+			rawMessage("raw-2", body),
+			observationsRecordedEntry("om-1", { observations: [observation("2026-05-02T10:00:01")], coversUpToId: "raw-2" }),
+			rawMessage("raw-3", body),
+		];
+		expect(snapFirstKeptEntryId(branch, "raw-3", 5)).toBe("raw-3");
+	});
+
+	it("(c) falls back to pi's proposal when NO acked boundary qualifies", () => {
+		// A dropped-only branch: coverage exists, boundaries exist, but the gate refuses
+		// every one of them → zero eligible boundaries → conservative fallback to pi's proposal.
+		const branch = [
+			rawMessage("raw-1", body),
+			rawMessage("raw-2", body),
+			observationsDroppedEntry("drop-1", { observationTimestamps: ["2026-05-02T10:00:01"], coversUpToId: "raw-2" }),
+			rawMessage("raw-3", body),
+		];
+
+		// Pre-gate: the dropped boundary at raw-2 would win (firstKept raw-3), overriding
+		// pi's proposal raw-2. Post-gate: refused → pi's proposal raw-2 stands.
+		expect(snapFirstKeptEntryId(branch, "raw-2", 5)).toBe("raw-2");
+	});
+
+	it("(d) determinism: identical branch + args ⇒ identical snap (C3)", () => {
+		const branch = [
+			rawMessage("raw-1", body),
+			rawMessage("raw-2", body),
+			observationsDroppedEntry("drop-1", { observationTimestamps: ["2026-05-02T10:00:01"], coversUpToId: "raw-2" }),
+			rawMessage("raw-3", body),
+			gapEntry("gap-1", { afterEntryId: "raw-2", coversUpToId: "raw-3", attempts: 2, lastError: "x" }),
+			rawMessage("raw-4", body),
+		];
+		const a = snapCutoff(branch, "raw-4", 10);
+		const b = snapCutoff(branch, "raw-4", 10);
+		expect(a).toEqual(b);
+		// gap boundary accepted; dropped-refusal here is incidental (delta 0 either
+		// way) — the real filter guards are (a) and (c).
+		expect(a.firstKeptId).toBe("raw-4");
 	});
 });

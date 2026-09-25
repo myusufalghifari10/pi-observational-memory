@@ -1,10 +1,16 @@
 import { estimateEntryTokens } from "../tokens.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
+	OM_OBSERVATIONS_GAP,
 	OM_OBSERVATIONS_RECORDED,
 	type Entry,
 	type MemoryCustomType,
+	type ObservationsGapEntryData,
 	type ProvenanceClass,
+	isObservationsDroppedEntry,
+	isObservationsGapData,
+	isObservationsRecordedEntry,
+	isObservationsSupersededEntry,
 } from "./types.js";
 
 const SOURCE_ENTRY_TYPES = new Set(["message", "custom_message", "branch_summary"]);
@@ -192,6 +198,53 @@ export function rawTokensSinceObservationCoverage(entries: Entry[]): number {
 
 export function rawTokensSinceDropCoverage(entries: Entry[]): number {
 	return rawTokensSinceCoverage(entries, OM_OBSERVATIONS_DROPPED);
+}
+
+function isGapEntry(entry: Entry): entry is Entry & { data: ObservationsGapEntryData } {
+	return (
+		entry.type === "custom" && entry.customType === OM_OBSERVATIONS_GAP && isObservationsGapData(entry.data)
+	);
+}
+
+/** All coverage-bearing om.* entries (recorded/dropped/superseded/gap): boundary CANDIDATES. */
+function coverageCoversUpToId(entry: Entry): string | undefined {
+	if (isGapEntry(entry)) return entry.data.coversUpToId;
+	if (isObservationsRecordedEntry(entry) || isObservationsDroppedEntry(entry) || isObservationsSupersededEntry(entry)) {
+		return entry.data.coversUpToId;
+	}
+	return undefined;
+}
+
+/** Flush evidence: an om.observations.recorded or om.observations.gap commit (§2.4). */
+function isFlushAckSource(entry: Entry): boolean {
+	return isObservationsRecordedEntry(entry) || isGapEntry(entry);
+}
+
+/**
+ * P3.2 flush-ack gate (§2.4) — eligible snap boundaries, ascending.
+ *
+ * Candidates = branch-resolved coversUpToId of EVERY coverage-bearing om.* entry, then
+ * filtered: a boundary is eligible only when flush-acked by an om.observations.recorded
+ * or om.observations.gap entry covering EXACTLY it. Dropped/superseded coverage is the
+ * consolidator's watermark — bookkeeping, never flush evidence — and any future
+ * coverage source is gated by construction: compaction can never snap (and thereby
+ * evict) a chunk the observers never committed or acknowledged.
+ */
+export function ackedChunkBoundaryIndices(entries: Entry[]): number[] {
+	const indexes = entryIndexById(entries);
+	const candidates = new Set<number>();
+	const acked = new Set<number>();
+	for (const entry of entries) {
+		const covers = coverageCoversUpToId(entry);
+		if (covers === undefined) continue;
+		const idx = indexes.get(covers);
+		if (idx === undefined) continue;
+		candidates.add(idx);
+		if (isFlushAckSource(entry)) acked.add(idx);
+	}
+	return Array.from(candidates)
+		.filter((idx) => acked.has(idx))
+		.sort((a, b) => a - b);
 }
 
 export function findLastCompactionIndex(entries: Entry[]): number {

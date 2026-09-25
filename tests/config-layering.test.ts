@@ -81,3 +81,41 @@ describe("Runtime.ensureConfig per-cwd cache (P0.2)", () => {
 		}
 	});
 });
+
+describe("P3.4 frequency flip — explicit user config still wins (L12)", () => {
+	it("pins the new default: DEFAULTS.compactAtContextTokens is 64_000", () => {
+		expect(DEFAULTS.compactAtContextTokens).toBe(64_000);
+	});
+
+	it("an explicit global compactAtContextTokens (e.g. the user's 262k) survives layering", () => {
+		const merged = mergeSettingsConfig({ compactAtContextTokens: 262_000 }, {});
+		expect(merged.compactAtContextTokens).toBe(262_000);
+	});
+
+	it("a project-level value still wins over BOTH the global value and the new default", () => {
+		const merged = mergeSettingsConfig({ compactAtContextTokens: 262_000 }, { compactAtContextTokens: 100_000 });
+		expect(merged.compactAtContextTokens).toBe(100_000);
+	});
+
+	it("layers that do not mention the key fall back to the 64k default", () => {
+		expect(mergeSettingsConfig({}, {}).compactAtContextTokens).toBe(64_000);
+		// Mentions of OTHER keys must not disturb it either.
+		expect(mergeSettingsConfig({ chunkTokens: 15_000 }, { serialWorkers: true }).compactAtContextTokens).toBe(64_000);
+	});
+
+	it("Runtime.end-to-end: an explicit project compactAtContextTokens wins at load time", () => {
+		const dir = mkdtempSync(join(tmpdir(), "om-p34-"));
+		mkdirSync(join(dir, ".pi"), { recursive: true });
+		writeFileSync(
+			join(dir, ".pi", "settings.json"),
+			JSON.stringify({ "observational-memory": { compactAtContextTokens: 262_000 } }),
+		);
+		try {
+			const runtime = new Runtime();
+			runtime.ensureConfig(dir);
+			expect(runtime.config.compactAtContextTokens).toBe(262_000);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
