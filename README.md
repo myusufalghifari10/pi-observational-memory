@@ -203,9 +203,12 @@ The rendered block, in order: instructions & context policy → `## State (as of
 
 ## Install
 
-**Requirements:** [Node.js](https://nodejs.org) ≥ 20, [pi](https://pi.dev) installed and run at least once, and an LLM provider for your worker models (optional — unset `models.*` falls back to the built-in default worker model).
+One installer core (`scripts/install-core.cjs`), two thin launchers — every step is identical on
+all three OSes: prerequisites (the script prints the exact per-OS fix if anything is missing), dev
+dependencies, typecheck, registration into `~/.pi/agent/settings.json`, and config seeding.
+Requirements: **Node.js ≥ 20**, **git**, and [pi](https://pi.dev) installed and run at least once.
 
-**macOS / Linux** (and Windows via Git Bash):
+### Linux
 
 ```bash
 git clone https://github.com/myusufalghifari10/pi-observational-memory.git
@@ -213,20 +216,39 @@ cd pi-observational-memory
 sh scripts/install.sh
 ```
 
-**Windows (PowerShell):**
+### macOS
+
+```bash
+git clone https://github.com/myusufalghifari10/pi-observational-memory.git
+cd pi-observational-memory
+sh scripts/install.sh
+```
+
+### Windows
+
+PowerShell (or the equivalent in Git Bash):
 
 ```powershell
 git clone https://github.com/myusufalghifari10/pi-observational-memory.git
 cd pi-observational-memory
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+# Git Bash alternative: sh scripts/install.sh
 ```
 
-Both launchers run the same cross-platform core (`scripts/install-core.cjs` — one source of truth for Linux, macOS, and Windows, so the install steps can never drift between OSes). It checks prerequisites (with per-OS Node install hints), installs dev dependencies, typechecks, registers the repo in the `packages` array of `~/.pi/agent/settings.json`, and seeds an `observational-memory` config block **if you don't have one** (an existing config is never touched; a `.bak` backup is written; the run is idempotent — safe to re-run after `git pull`).
+(Git Bash ships with [Git for Windows](https://git-scm.com/download/win) — and `git clone` needs
+git anyway.)
+
+The installer registers the repo in the `packages` array of `~/.pi/agent/settings.json` and seeds
+an `observational-memory` config block **if you don't have one** — an existing config is never
+touched, a `.bak` backup is written, and the run is idempotent (safe to re-run after `git pull`).
+Unset `models.*` falls back to the built-in default worker model; add your own `models` block to
+pick the worker provider/model.
 
 - `--test` — also run the full test suite before registering
 - `--no-register` — install only, and print the line to add manually
 
-Manual alternative: `npm install`, then add the absolute clone path to the `packages` array in `~/.pi/agent/settings.json`. Either way, **restart pi**, then run `/om on`.
+Manual alternative: `npm install`, then add the absolute clone path to the `packages` array in
+`~/.pi/agent/settings.json`. Either way, **restart pi**, then run `/om on`.
 
 ## Configuration
 
