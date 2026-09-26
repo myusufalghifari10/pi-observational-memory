@@ -203,7 +203,9 @@ The rendered block, in order: instructions & context policy → `## State (as of
 
 ## Install
 
-**Requirements:** [Node.js](https://nodejs.org) ≥ 20, [pi](https://pi.dev) installed and run at least once, and an LLM provider configured for your worker models (default: `openrouter/z-ai/glm-5.3`).
+**Requirements:** [Node.js](https://nodejs.org) ≥ 20, [pi](https://pi.dev) installed and run at least once, and an LLM provider for your worker models (optional — unset `models.*` falls back to the built-in default worker model).
+
+**macOS / Linux** (and Windows via Git Bash):
 
 ```bash
 git clone https://github.com/myusufalghifari10/pi-observational-memory.git
@@ -211,10 +213,18 @@ cd pi-observational-memory
 sh scripts/install.sh
 ```
 
-The script checks prerequisites, installs dev dependencies, typechecks, registers the repo in the `packages` array of `~/.pi/agent/settings.json`, and seeds an `observational-memory` config block **if you don't have one** (an existing config is never touched; a `.bak` backup is written; the run is idempotent).
+**Windows (PowerShell):**
 
-- `sh scripts/install.sh --test` — also run the full test suite before registering
-- `sh scripts/install.sh --no-register` — install only, and print the line to add manually
+```powershell
+git clone https://github.com/myusufalghifari10/pi-observational-memory.git
+cd pi-observational-memory
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+```
+
+Both launchers run the same cross-platform core (`scripts/install-core.cjs` — one source of truth for Linux, macOS, and Windows, so the install steps can never drift between OSes). It checks prerequisites (with per-OS Node install hints), installs dev dependencies, typechecks, registers the repo in the `packages` array of `~/.pi/agent/settings.json`, and seeds an `observational-memory` config block **if you don't have one** (an existing config is never touched; a `.bak` backup is written; the run is idempotent — safe to re-run after `git pull`).
+
+- `--test` — also run the full test suite before registering
+- `--no-register` — install only, and print the line to add manually
 
 Manual alternative: `npm install`, then add the absolute clone path to the `packages` array in `~/.pi/agent/settings.json`. Either way, **restart pi**, then run `/om on`.
 
