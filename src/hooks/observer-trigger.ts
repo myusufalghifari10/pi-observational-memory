@@ -146,7 +146,7 @@ function laterMarkerId(branch: Entry[], a: string | undefined, b: string | undef
 }
 
 /** Effective watermark = later of committed ledger coverage and the in-memory dispatch marker. */
-function effectiveWatermarkId(runtime: Runtime, branch: Entry[]): string | undefined {
+export function effectiveWatermarkId(runtime: Runtime, branch: Entry[]): string | undefined {
 	const committed = latestCoverageMarkerId(branch, OM_OBSERVATIONS_RECORDED);
 	const dispatchedResolved = entryIndexForId(branch, runtime.dispatchedCoversUpToId) >= 0 ? runtime.dispatchedCoversUpToId : undefined;
 	return laterMarkerId(branch, committed, dispatchedResolved);
@@ -277,7 +277,21 @@ export function pumpWorkerQueue(pi: ExtensionAPI, runtime: Runtime, ctx: Trigger
  * backlog and concurrency for. Pure dispatch: each observer is awaited inside its own async
  * task tracked in `runtime.observersInFlight`, never blocking the event handler.
  */
-export function evaluateObserverTriggers(pi: ExtensionAPI, runtime: Runtime, ctx: TriggerCtx): void {
+/**
+ * Dispatch every observer slice the branch currently owes: a queued failed chunk first
+ * (retry-once), then fresh chunks up to the concurrency slots.
+ *
+ * `opts.force` bypasses ONLY the "is a full chunk ready?" threshold, for `/om:observer`
+ * (manual run before the threshold is reached). The chunk budget itself is untouched, so a
+ * forced run still slices by the configured `chunkTokens` and a below-threshold tail becomes
+ * exactly one small chunk instead of being re-sliced by a shrunken budget.
+ */
+export function evaluateObserverTriggers(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	ctx: TriggerCtx,
+	opts: { force?: boolean } = {},
+): void {
 	if (!runtime.enabled || runtime.config.passive) return;
 	// P0.4: circuit breaker — a paused pipeline never dispatches (no retries, no new chunks).
 	if (runtime.pipelinePaused) return;
@@ -331,7 +345,8 @@ export function evaluateObserverTriggers(pi: ExtensionAPI, runtime: Runtime, ctx
 		const remaining = rawTokensAfterIndex(branch, watermarkIndex);
 		// Use break (not return) so execution always reaches the post-loop notify.
 		// A return here would exit the function before the batched start-toast fires.
-		if (remaining < runtime.config.chunkTokens) break;
+		// `/om:observer` forces past this clock; the empty-slice guard below still stops it.
+		if (!opts.force && remaining < runtime.config.chunkTokens) break;
 
 		const slice = selectSourceSlice(branch, watermarkId, runtime.config.chunkTokens);
 		if (slice.entries.length === 0 || !slice.coversUpToId) break;

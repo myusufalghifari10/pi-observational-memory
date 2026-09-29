@@ -113,6 +113,7 @@ The rendered block, in order: instructions & context policy → `## State (as of
 | `/om:status` | Clocks, pools, in-flight workers, cost, last error, ASCII timeline |
 | `/om:compact` | Force a compaction now, ignoring the threshold |
 | `/om:consolidate` | Force consolidation of the observation pool now |
+| `/om:observer` | Force an observer run now, ignoring the chunk threshold (also retries a queued failed chunk) |
 | `/om-parallel` | Switch to parallel observers (`serialWorkers: false`) — for cloud models |
 | `/om-sequential` | Switch to serial workers (`serialWorkers: true`) — for local models |
 | `/om-change-model` | Interactive picker: role → provider → model → thinking level, applied live |
