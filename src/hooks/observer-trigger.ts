@@ -296,6 +296,12 @@ export function evaluateObserverTriggers(
 	// P0.4: circuit breaker — a paused pipeline never dispatches (no retries, no new chunks).
 	if (runtime.pipelinePaused) return;
 
+	// S2 anti-starvation: no NEW observer may start while a compaction barrier is running
+	// (wait observers → run the consolidator → render). Every observer completion pumps the queue,
+	// so without this guard a busy session would keep feeding fresh chunks and the barrier could
+	// never observe a settled worker state.
+	if (runtime.compactionBarrier) return;
+
 	const hasUI = ctx.hasUI;
 	const ui = ctx.ui;
 	const sessionManager = ctx.sessionManager;
@@ -444,7 +450,7 @@ async function dispatchObserver(
 			sessionName: `om-observer-${runId}`,
 			kickoffPrompt: userText,
 		});
-		const env = buildWorkerEnv("observer", { memoryRoot: runtime.memoryRoot, runId });
+		const env = buildWorkerEnv("observer", { sandboxRoot: runtime.memoryRoot, runId });
 		const exit = await spawnWorker({ argv, cwd: runtime.memoryRoot, env, signal: controller.signal });
 		// P0.1: the session may have been replaced while the worker ran. Discard silently —
 		// no cost append, no observations, no toasts, no retry bookkeeping (no retry, no error).

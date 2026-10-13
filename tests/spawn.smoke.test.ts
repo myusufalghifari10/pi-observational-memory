@@ -41,7 +41,7 @@ describe("launch argv + env", () => {
 
 	it("sets the worker IPC env vars", () => {
 		const memoryRoot = "/proj/.memory/sess-1";
-		const env = buildWorkerEnv("observer", { memoryRoot, runId: "r1" });
+		const env = buildWorkerEnv("observer", { sandboxRoot: memoryRoot, runId: "r1" });
 		expect(env.OM_WORKER).toBe("observer");
 		expect(env.OM_RUN_ID).toBe("r1");
 		// Chunk travels as the `pi -p` prompt (recorded user message), not via env/file.

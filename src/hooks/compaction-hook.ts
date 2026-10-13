@@ -15,6 +15,7 @@ import {
 	foldLedger,
 	isSourceEntry,
 	isValidCutPoint,
+	poolTokens,
 	rawTokensAfterIndex,
 	renderSummaryV2,
 	type Entry,
@@ -25,6 +26,8 @@ import {
 } from "../ledger/index.js";
 import { estimateStringTokens } from "../tokens.js";
 import type { Topic } from "../memory/paths.js";
+import { evaluateConsolidatorTrigger } from "./consolidator-trigger.js";
+import { pumpWorkerQueue } from "./observer-trigger.js";
 
 /** First source entry after `boundaryIndex` that is a valid cut point, or undefined. */
 function firstKeptAfterBoundary(branch: Entry[], boundaryIndex: number): Entry | undefined {
@@ -215,6 +218,10 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 		}
 
 		runtime.compactHookInFlight = true;
+		// S2: the barrier spans this whole hook — observers settle, then (if the pool is due) the
+		// consolidator runs, then the render. Observer dispatch yields for its whole duration.
+		runtime.compactionBarrier = true;
+		const barrierAt = Date.now();
 		try {
 			runtime.ensureConfig(ctx.cwd);
 			const tailTokens = runtime.config.tailTokens;
@@ -227,17 +234,80 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			let snap = snapCutoff(branch, firstKeptEntryId, tailTokens);
 
 			// R5 fast path: skip the wait when no in-flight observer can affect this compaction
-			// (its chunk lands in the verbatim tail and the snap is stable). Otherwise wait for
-			// observers to settle, then re-read the branch and recompute the snap so just-committed
+			// (its chunk lands in the verbatim tail and the snap is stable) — but NEVER while a
+			// consolidation is in flight: its staged generation has not been promoted yet, so the
+			// durable files this render reads are still mid-update. Otherwise wait for the workers to
+			// settle, then re-read the branch and recompute the snap so just-committed
 			// `om.observations.recorded` entries are folded (pi's `event.branchEntries` is stale).
-			const skip = canSkipObserverWait(branch, snap.firstKeptId, snap.tail, tailTokens, runtime.observersInFlight.values());
+			const skip =
+				!runtime.consolidatorInFlight &&
+				canSkipObserverWait(branch, snap.firstKeptId, snap.tail, tailTokens, runtime.observersInFlight.values());
 			runtime.lastCompactionObserverWait = skip ? "skipped" : "waited";
 			if (!skip) {
-				if (hasUI) ctx.ui.notify("om: waiting for in-flight observers before folding…", "info");
-				await runtime.whenObserversIdle();
+				if (hasUI) {
+					ctx.ui.notify(
+						runtime.consolidatorInFlight
+							? "om: waiting for in-flight observers and the running consolidation before folding…"
+							: "om: waiting for in-flight observers before folding…",
+						"info",
+					);
+				}
+				await runtime.whenWorkersIdle();
 				branch = (ctx.sessionManager?.getBranch?.() as Entry[] | undefined) ?? (event.branchEntries as Entry[]);
 				snap = snapCutoff(branch, firstKeptEntryId, tailTokens);
 			}
+
+			// S2: the barrier DRIVES the consolidator — waiting alone would deadlock, because the
+			// dispatcher runs on turn_end/agent_start and pi is blocked in this hook until it returns.
+			// The pool clock alone decides whether one is due (a manual /om:compact still gets settled
+			// observers, just without forcing a consolidation).
+			const observerWaitMs = Date.now() - barrierAt;
+			let consolidationMs: number | undefined;
+			const poolIsDue = (): boolean =>
+				poolTokens(foldLedger(branch).activeObservations) >= runtime.config.consolidateAtPoolTokens;
+			// A consolidation rewrote the durable files (and drained the pool): re-read the branch so the
+			// snap + projection render the post-consolidation state.
+			const resnap = (): void => {
+				branch = (ctx.sessionManager?.getBranch?.() as Entry[] | undefined) ?? (event.branchEntries as Entry[]);
+				snap = snapCutoff(branch, firstKeptEntryId, tailTokens);
+			};
+			if (poolIsDue()) {
+				const consolidationAt = Date.now();
+				// `allowDuringBarrier`: this hook IS the barrier and owns the ordering; background pumps
+				// (which honour the barrier) must never start a second staged run in the await gap below.
+				evaluateConsolidatorTrigger(pi, runtime, ctx, { allowDuringBarrier: true });
+				await runtime.whenConsolidatorIdle();
+				resnap();
+
+				// #11 (owner decision): a consolidation that FAILED while this barrier was pending earns
+				// exactly ONE retry, and the render happens whatever the outcome — a worker failure must
+				// never cost the user the compaction that is already in flight. A failure on the BACKGROUND
+				// path is the opposite: no retry, no compaction (the batch just stays re-foldable).
+				// Bounded by construction: a single `if` — never a loop — and skipped entirely while the
+				// pipeline is paused, because the trigger would no-op and the notice would lie
+				// (manual recovery lives in /om:consolidate and /om:observer).
+				if (!runtime.pipelinePaused && runtime.lastConsolidation?.ok === false && poolIsDue()) {
+					if (hasUI) ctx.ui.notify("om: consolidation failed — retrying once before folding…", "warning");
+					runtime.lastConsolidation = undefined; // the retry's own outcome is what the reads below see
+					evaluateConsolidatorTrigger(pi, runtime, ctx, { allowDuringBarrier: true });
+					await runtime.whenConsolidatorIdle();
+					resnap();
+				}
+				consolidationMs = Date.now() - consolidationAt;
+			}
+			runtime.lastBarrier = {
+				at: barrierAt,
+				observerWaitMs,
+				consolidationMs,
+				// S6 (audit N2): only a consolidation of THIS barrier has a promote outcome to report —
+				// otherwise /om:status would show the result of some earlier run.
+				promote: consolidationMs === undefined ? undefined : runtime.lastPromote,
+			};
+			logIfEnabled(runtime.config.debugLog, "compaction.barrier", {
+				observerWaitMs,
+				consolidationMs: consolidationMs ?? null,
+				promote: runtime.lastPromote ?? null,
+			});
 
 			const snapped = snap.firstKeptId;
 			logIfEnabled(runtime.config.debugLog, "compaction.snap", {
@@ -312,7 +382,11 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 				},
 			};
 		} finally {
+			runtime.compactionBarrier = false;
 			runtime.compactHookInFlight = false;
+			// S2 (audit N5): observers yielded for the whole barrier. Re-drive the queue now that it is
+			// closed instead of leaving the backlog to wait for the next turn_end/agent_start.
+			pumpWorkerQueue(pi, runtime, ctx);
 		}
 	});
 }

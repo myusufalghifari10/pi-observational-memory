@@ -55,10 +55,13 @@ describe("renderSummary (Phase A — observations only)", () => {
 		expect(block).toContain("Started the project.");
 	});
 
-	it("tells the reader it can query older memory via knowledge_search", () => {
+	it("no longer points the reader at an external knowledge base (S7 decoupling)", () => {
 		const block = renderSummary(undefined, undefined, [observation("2026-05-02T10:00:01")]);
-		expect(block).toContain("knowledge_search");
-		expect(block.indexOf("knowledge_search")).toBeLessThan(block.indexOf("## Observations"));
+		expect(block).not.toContain("knowledge_search");
+		expect(block).not.toContain("second-brain");
+		// Retrieval stays in-repo: the instructions still send the reader to the durable files.
+		expect(block).toContain(".memory/DEATHS.md");
+		expect(block.indexOf(".memory/DEATHS.md")).toBeLessThan(block.indexOf("## Observations"));
 	});
 
 	it("formats a single observation line as 'timestamp  content'", () => {

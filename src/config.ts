@@ -32,9 +32,10 @@ export interface Config {
 	observerConcurrency: number;
 	/**
 	 * Queue workers one at a time: never more than ONE worker subprocess (observer OR
-	 * consolidator) in flight. For local-model backends where parallel subprocesses thrash.
-	 * The queue is event-driven; when the pool is due for consolidation the consolidator gets
-	 * the slot before new observers. Default false (parallel observers, background consolidator).
+	 * consolidator) in flight. The pipeline is ALWAYS sequential — this flag is forced true on
+	 * every config load (a legacy `false` in settings.json is ignored) and survives only so the
+	 * runtime slot math reads a single switch. The queue is event-driven; when the pool is due
+	 * for consolidation the consolidator gets the slot before new observers.
 	 */
 	serialWorkers: boolean;
 	models: {
@@ -62,7 +63,7 @@ export const DEFAULTS: Config = {
 	tailTokens: 20_000,
 	journeyTargetTokens: 1_000,
 	observerConcurrency: 4,
-	serialWorkers: false,
+	serialWorkers: true,
 	resumeAfterMidRunCompaction: true,
 	models: {
 		observer: { provider: "openrouter", id: "z-ai/glm-5.3", thinking: "low" },
@@ -123,7 +124,10 @@ export function normalizeSettingsConfig(value: Record<string, unknown>, base: Co
 	if (value.chunkOverlapTokens === 0) normalized.chunkOverlapTokens = 0;
 	if (typeof value.resumeAfterMidRunCompaction === "boolean")
 		normalized.resumeAfterMidRunCompaction = value.resumeAfterMidRunCompaction;
-	if (typeof value.serialWorkers === "boolean") normalized.serialWorkers = value.serialWorkers;
+	// The pipeline is ALWAYS sequential: a boolean legacy value is accepted as valid input but
+	// ALWAYS normalizes to true, so `serialWorkers: false` in settings.json can never re-enable
+	// parallel observers. Non-boolean garbage is still ignored (undefined ⇒ DEFAULTS).
+	if (typeof value.serialWorkers === "boolean") normalized.serialWorkers = true;
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
 	if (isRecord(value.models)) {

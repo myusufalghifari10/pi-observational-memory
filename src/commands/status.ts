@@ -22,6 +22,19 @@ export function formatPipelineLine(runtime: Runtime): string {
 }
 
 /**
+ * S2/S6 — compaction-barrier line for /om:status (extracted for testability). Shows what the last
+ * barrier cost: the observer wait, the consolidation it ran (if the pool was due) and the promote
+ * outcome of that consolidation.
+ */
+export function formatBarrierLine(runtime: Runtime): string {
+	const barrier = runtime.lastBarrier;
+	if (!barrier) return "last barrier: n/a";
+	const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
+	const consolidation = barrier.consolidationMs === undefined ? "none" : seconds(barrier.consolidationMs);
+	return `last barrier: observer wait ${seconds(barrier.observerWaitMs)} · consolidation ${consolidation} · promote ${barrier.promote ?? "n/a"}`;
+}
+
+/**
  * P0.8 — journey size line for /om:status (extracted for testability).
  *
  * Visibility only, per the user's decision: growth of JOURNEY.md on a long session is fine
@@ -164,13 +177,16 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 
 			const lines = [
 				`om status`,
-				`  observers in flight: ${runtime.observersInFlight.size} / ${runtime.config.observerConcurrency}`,
+				`  mode: sequential (mandatory — one worker at a time)`,
+				`  workers: ${runtime.workerBusy ? "1 running" : "idle"} / 1 slot`,
+				`  observers in flight: ${runtime.observersInFlight.size} / ${runtime.config.serialWorkers ? 1 : runtime.config.observerConcurrency}`,
+				`  consolidator: ${runtime.consolidatorInFlight ? "running" : "idle"}`,
 				`  active observations: ${folded.activeObservations.length}`,
 				`  next observer: ${sinceObservation.toLocaleString()} / ${runtime.config.chunkTokens.toLocaleString()} tok`,
 				`  pool: ${pool.toLocaleString()} tok (target ${runtime.config.poolTargetTokens.toLocaleString()}, consolidate at ${runtime.config.consolidateAtPoolTokens.toLocaleString()})`,
-				`  consolidator: ${runtime.consolidatorInFlight ? "running" : "idle"}`,
 				`  pipeline: ${formatPipelineLine(runtime)}`, // P0.4 circuit-breaker visibility
 				`  last compaction wait: ${runtime.lastCompactionObserverWait ?? "n/a"}`,
+				`  ${formatBarrierLine(runtime)}`, // S6 barrier/promote telemetry
 				`  topic files: ${topics.length}`,
 				`  ${formatJourneyLine(journey, runtime.config.journeyTargetTokens, estimateStringTokens)}`, // P0.8 over-size warn
 				...formatHealthLines(health), // P5.2 operator telemetry

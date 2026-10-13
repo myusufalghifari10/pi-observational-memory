@@ -10,8 +10,22 @@
  *
  * All writes are atomic (temp + rename) so a reader never sees a half-written file.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import {
+	copyFileSync,
+	existsSync,
+	linkSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	readlinkSync,
+	renameSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 export const INDEX_FILENAME = "INDEX.md";
 /**
@@ -328,4 +342,274 @@ export function listStrats(root: string): Strat[] {
 	}
 	strats.sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0));
 	return strats;
+}
+
+// ── Staged consolidation generations (S3) ──────────────────────────────────────
+//
+// The live memory root `.memory/<sessionId>` is a SYMLINK to a generation directory
+// `.memory/<sessionId>.g<N>`. A consolidator run writes into a FRESH generation created as a
+// hardlink copy of the live one; a clean exit is promoted with a single atomic rename of the
+// symlink, and any failure just drops the working generation — the live memory is never
+// touched, and the batch stays un-tombstoned so the next run re-folds it.
+//
+// `live` is the only path the rest of the system uses (render, status, master `read`/`grep`,
+// worker IPC); only the consolidator's sandbox root (`OM_MEMORY_DIR`) and its cwd point at
+// `work`. Promotion must NOT run while a worker is in flight (the barrier guarantees that),
+// because the previous generation is deleted on promote.
+
+/**
+ * A staging pair. `staged: false` means staging was unavailable (migration or copy failed) and
+ * `work === live`: callers keep working in place, losing only the crash isolation.
+ */
+export type StagingRoots = {
+	live: string;
+	work: string;
+	staged: boolean;
+};
+
+/** lstat-based symlink test (never follows the link; false for missing paths). */
+function isSymlink(path: string): boolean {
+	try {
+		return lstatSync(path).isSymbolicLink();
+	} catch {
+		return false;
+	}
+}
+
+/** True when `name` is a generation directory of `root` (`<basename>.g<N>`). */
+function isGenerationName(root: string, name: string): boolean {
+	return name.startsWith(`${basename(root)}.g`);
+}
+
+/**
+ * Highest-numbered existing generation directory of `root`, or undefined when there is none.
+ *
+ * FALLBACK ONLY: crash recovery prefers the recorded promoted generation
+ * (`generationMarkerPath`). "Newest wins" is safe only when no work generation can leak — and a
+ * SIGKILLed run leaks one (no `finally` runs), holding partial writes.
+ */
+export function latestGenerationDir(root: string): string | undefined {
+	const parent = dirname(root);
+	if (!existsSync(parent)) return undefined;
+	let best: string | undefined;
+	let bestN = 0;
+	for (const name of readdirSync(parent)) {
+		if (!isGenerationName(root, name)) continue;
+		const n = Number.parseInt(name.slice(basename(root).length + 2), 10);
+		if (!Number.isInteger(n) || n <= bestN) continue;
+		bestN = n;
+		best = name;
+	}
+	return best ? join(parent, best) : undefined;
+}
+
+/**
+ * Persisted pointer to the generation the live symlink was LAST promoted to. Recovery follows
+ * this instead of the newest `.g<N>`: a SIGKILLed run leaves its half-written work generation on
+ * disk, and "newest wins" would adopt those partial writes as live memory.
+ *
+ * The marker filename is dot-prefixed and does not match the `<basename>.g<N>` generation shape
+ * (see `isGenerationName`), so it can never be mistaken for a generation.
+ */
+export function generationMarkerPath(root: string): string {
+	return join(dirname(root), `.livegen-${basename(root)}`);
+}
+
+/** Record the promoted generation (best-effort: without it, recovery falls back to newest). */
+function writeGenerationMarker(root: string, generationName: string): void {
+	try {
+		atomicWrite(generationMarkerPath(root), `${generationName}\n`);
+	} catch {
+		/* best-effort; recovery falls back to the newest generation */
+	}
+}
+
+/** The generation recorded by `writeGenerationMarker`, or undefined when missing/unusable. */
+function readGenerationMarker(root: string): string | undefined {
+	try {
+		const name = readFileSync(generationMarkerPath(root), "utf-8").trim();
+		if (!name || !isGenerationName(root, name)) return undefined;
+		const candidate = join(dirname(root), name);
+		if (isSymlink(candidate) || !existsSync(candidate)) return undefined;
+		return candidate;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Next free `<root>.g<N>` path (N starts at 1). */
+export function nextGenerationDir(root: string): string {
+	for (let n = 1; ; n++) {
+		const candidate = `${root}.g${n}`;
+		if (!existsSync(candidate) && !isSymlink(candidate)) return candidate;
+	}
+}
+
+/**
+ * Make `root` generational, idempotently:
+ *   - already a symlink → nothing to do;
+ *   - a real directory → rename it to the next free `.g<N>` and replace it with a RELATIVE
+ *     symlink (relative so the whole tree survives a move);
+ *   - missing while generation directories exist → re-point at the newest one (self-healing for
+ *     a crash between the rename and the symlink step; no consolidated memory is stranded);
+ *   - missing with no generations → nothing to do (the first promote will create the symlink).
+ *
+ * Returns false when the migration is impossible (e.g. a read-only parent). The directory is
+ * then guaranteed to still be at its original path — callers fall back to in-place operation.
+ */
+export function ensureGenerationalRoot(root: string): boolean {
+	if (isSymlink(root)) return true;
+	if (!existsSync(root)) {
+		// Prefer the recorded promoted generation. Only when there is none (legacy root, or a marker
+		// lost together with the symlink) fall back to "newest" — a leaked work generation from a
+		// SIGKILLed run is by definition not the recorded one, so it can never be adopted here.
+		const orphan = readGenerationMarker(root) ?? latestGenerationDir(root);
+		if (!orphan) return true;
+		try {
+			symlinkSync(basename(orphan), root);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	const target = nextGenerationDir(root);
+	try {
+		renameSync(root, target);
+	} catch {
+		return false; // nothing moved — still in place
+	}
+	try {
+		symlinkSync(basename(target), root);
+		// The migration itself is a promote: record it so recovery never has to guess.
+		writeGenerationMarker(root, basename(target));
+		return true;
+	} catch {
+		// The rename succeeded but the symlink could not be created: put the directory back so
+		// the memory never becomes unreachable through its normal path.
+		try {
+			renameSync(target, root);
+		} catch {
+			// Leave the .g<N> directory; the `missing + generations exist` branch above re-points
+			// the root at it on the next call.
+		}
+		return false;
+	}
+}
+
+/**
+ * Recursive copy of a memory tree using hardlinks (falling back to a byte copy when the
+ * filesystem refuses a link). Safe because every writer (the consolidator's `write`/`edit`
+ * tools, `atomicWrite`) replaces files via temp+rename: rewriting a file inside the copy
+ * breaks the link instead of mutating the live file.
+ *
+ * Dot-prefixed entries are skipped — `.runs/` is transient worker IPC that must stay owned by
+ * the live root (the orchestrator reads an in-flight worker's cost/result through it).
+ */
+export function hardlinkCopyTree(src: string, dest: string): void {
+	mkdirSync(dest, { recursive: true });
+	for (const name of readdirSync(src)) {
+		if (name.startsWith(".")) continue;
+		const from = join(src, name);
+		const to = join(dest, name);
+		const stat = lstatSync(from);
+		if (stat.isSymbolicLink()) continue; // never follow links out of the tree
+		if (stat.isDirectory()) {
+			hardlinkCopyTree(from, to);
+			continue;
+		}
+		if (!stat.isFile()) continue;
+		try {
+			linkSync(from, to);
+		} catch {
+			copyFileSync(from, to); // EXDEV / filesystem without hardlinks
+		}
+	}
+}
+
+/**
+ * Create the work generation for one consolidation: migrate the live root if needed, then
+ * hardlink-copy its content into a fresh `.g<N>`. Always returns a usable `StagingRoots` —
+ * `staged: false` (in-place) when the tree could not be prepared.
+ */
+export function beginStaging(liveRoot: string): StagingRoots {
+	if (!ensureGenerationalRoot(liveRoot)) return { live: liveRoot, work: liveRoot, staged: false };
+	const work = nextGenerationDir(liveRoot);
+	try {
+		mkdirSync(work, { recursive: true });
+		if (existsSync(liveRoot)) hardlinkCopyTree(liveRoot, work);
+	} catch {
+		try {
+			rmSync(work, { recursive: true, force: true });
+		} catch {
+			/* best-effort cleanup */
+		}
+		return { live: liveRoot, work: liveRoot, staged: false };
+	}
+	return { live: liveRoot, work, staged: true };
+}
+
+/**
+ * Outcome of committing a consolidation. `in-place` is NOT a failure: staging was unavailable,
+ * so the run wrote straight into the live root and its writes are already durable — callers must
+ * drop the batch in that case and keep it only on `failed`.
+ */
+export type PromoteOutcome = "promoted" | "in-place" | "failed";
+
+/**
+ * Promote a staged work generation: build the new symlink next to the live root and swap it in
+ * with ONE `rename()` (atomic on POSIX), then delete the previous generation.
+ *
+ * `failed` means the writes are NOT visible through the live root (the previous generation is
+ * still live) — the caller must leave the batch un-tombstoned so the next run re-folds it.
+ * Deleting the previous generation is guarded twice: only a `.g<N>` sibling of the live root is
+ * ever removed, and never the generation just promoted.
+ */
+export function promoteStaging(roots: StagingRoots | undefined): PromoteOutcome {
+	if (!roots) return "failed";
+	if (!roots.staged || roots.work === roots.live) return "in-place";
+	let previous: string | undefined;
+	try {
+		previous = readlinkSync(roots.live);
+	} catch {
+		previous = undefined; // fresh root: there was no live memory before
+	}
+	const swap = `${roots.live}.swap-${process.pid}-${Date.now()}`;
+	try {
+		symlinkSync(basename(roots.work), swap);
+		renameSync(swap, roots.live);
+	} catch {
+		try {
+			rmSync(swap, { force: true });
+		} catch {
+			/* best-effort cleanup */
+		}
+		return "failed";
+	}
+	// The swap is live: record it BEFORE any cleanup, so a crash during the GC below can never
+	// leave recovery pointing at a generation that is no longer the promoted one.
+	writeGenerationMarker(roots.live, basename(roots.work));
+	if (previous) {
+		const old = resolve(dirname(roots.live), previous);
+		if (old !== resolve(roots.work) && isGenerationName(roots.live, basename(old))) {
+			try {
+				rmSync(old, { recursive: true, force: true });
+			} catch {
+				/* A leaked generation is inert: recovery follows the promoted-generation marker, not
+				   the newest `.g<N>`, so its partial writes can never be adopted as live memory. */
+			}
+		}
+	}
+	return "promoted";
+}
+
+/** Drop a work generation (run failed / aborted / session replaced). Never throws, never
+ * touches the live root. Safe on an undefined or in-place pair. */
+export function discardStaging(roots: StagingRoots | undefined): void {
+	if (!roots || !roots.staged || roots.work === roots.live) return;
+	try {
+		rmSync(roots.work, { recursive: true, force: true });
+	} catch {
+		/* best-effort cleanup */
+	}
 }

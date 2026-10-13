@@ -4,8 +4,9 @@
  * durable `.memory/` topic files via a subprocess consolidator, then tombstone exactly the
  * timestamps it reports back.
  *
- * Runs in the BACKGROUND, mirroring the observer trigger (turn_end / agent_start), strictly
- * one at a time (design risk 4). Compaction does not wait for it (R5).
+ * Runs in the BACKGROUND, mirroring the observer trigger (turn_end / agent_start), strictly one
+ * at a time (design risk 4). Under the S2 barrier compaction DOES wait for it: the hook drains
+ * observers first, then dispatches a due consolidation itself and waits for it before rendering.
  *
  * Tombstone safety (design risk 4): the orchestrator tombstones the batch it handed the
  * consolidator, intersected with what is STILL active at exit — never an observation an
@@ -87,13 +88,24 @@ function buildConsolidatorPrompt(memoryRoot: string, promote: Observation[], jou
 	);
 }
 
-export function evaluateConsolidatorTrigger(pi: ExtensionAPI, runtime: Runtime, ctx: TriggerCtx): void {
+export function evaluateConsolidatorTrigger(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	ctx: TriggerCtx,
+	opts: { allowDuringBarrier?: boolean } = {},
+): void {
 	if (!runtime.enabled || runtime.config.passive) return;
+	// S2 (audit N1): inside a compaction barrier the HOOK owns the ordering and dispatches the
+	// consolidator itself. Every background pump (i.e. a worker completion landing in the barrier's
+	// await gap) must stand down, or a SECOND staged run could start while the barrier is mid-flight.
+	if (runtime.compactionBarrier && !opts.allowDuringBarrier) return;
 	// P0.4: circuit breaker — a paused pipeline never dispatches.
 	if (runtime.pipelinePaused) return;
 	if (runtime.consolidatorInFlight) return;
-	// Serial mode: the single worker slot must be free of observers before consolidating.
-	if (runtime.config.serialWorkers && runtime.observersInFlight.size > 0) return;
+	// S2: consolidation starts only from a SETTLED observer state — unconditionally (the pipeline
+	// is sequential-only). The compaction barrier relies on this so the batch it hands over is
+	// complete up to the current watermark, and so a staged promote never races a running worker.
+	if (runtime.observersInFlight.size > 0) return;
 
 	const branch = ctx.sessionManager.getBranch();
 	const active = foldLedger(branch).activeObservations;
@@ -106,9 +118,9 @@ export function evaluateConsolidatorTrigger(pi: ExtensionAPI, runtime: Runtime, 
 	if (ctx.hasUI) {
 		ctx.ui?.notify(`om: consolidator started (${promote.length} obs, ~${poolTokens(promote).toLocaleString()} tok)`, "info");
 	}
-	// Deliberately NOT tracked in observerTasks: compaction waits only for in-flight observers,
-	// never the consolidator (design R5). The consolidatorInFlight flag enforces one-at-a-time.
-	void dispatchConsolidator(pi, runtime, ctx, promote);
+	// Tracked as its OWN task (never in observerTasks: the compaction barrier waits for observers
+	// first so their commits land, then for this one — see Runtime.whenWorkersIdle).
+	runtime.trackConsolidatorTask(dispatchConsolidator(pi, runtime, ctx, promote));
 }
 
 async function dispatchConsolidator(
@@ -126,14 +138,24 @@ async function dispatchConsolidator(
 	runtime.status.workerStart("consolidator", runId);
 
 	try {
+		// #11: cleared at dispatch so a reader (the compaction barrier) can never mistake an earlier
+		// attempt's outcome for THIS run's — the field means "no outcome yet" until it settles.
+		runtime.lastConsolidation = undefined;
+		// S3: write into a fresh work generation (hardlink copy of the live memory) instead of the live
+		// root — a crashed/hung run can then never leave a half-updated memory behind. `staged: false`
+		// (work === live) is the in-place fallback when the tree cannot be prepared. Inside the try so
+		// even a pathological failure here unwinds through the catch/finally (flags always reset).
+		const staging = runtime.beginStaging();
 		const prompt = buildConsolidatorPrompt(runtime.memoryRoot, promote, runtime.config.journeyTargetTokens);
 		const argv = buildWorkerArgv({
 			model: runtime.config.models.consolidator,
 			sessionName: `om-consolidator-${runId}`,
 			kickoffPrompt: prompt,
 		});
-		const env = buildWorkerEnv("consolidator", { memoryRoot: runtime.memoryRoot, runId });
-		const exit = await spawnWorker({ argv, cwd: runtime.memoryRoot, env, signal: controller.signal });
+		// Sandbox + cwd = the work generation; `.runs/` IPC stays on the LIVE root so the orchestrator
+		// reads this run's cost through the path it always uses.
+		const env = buildWorkerEnv("consolidator", { sandboxRoot: staging.work, ipcRoot: runtime.memoryRoot, runId });
+		const exit = await spawnWorker({ argv, cwd: staging.work, env, signal: controller.signal });
 		// P0.1: session replaced while the worker ran — discard silently (no cost, no tombstone,
 		// no INDEX rewrite, no toasts).
 		if (!isCurrentSession(runtime, gen)) {
@@ -153,6 +175,19 @@ async function dispatchConsolidator(
 		const stillActive = new Set(foldLedger(branch).activeObservations.map((o) => o.timestamp));
 		const toDrop = promote.map((o) => o.timestamp).filter((t) => stillActive.has(t));
 
+		// S3: the run wrote into the WORK generation, so re-render INDEX.md THERE (promote deletes the
+		// previous generation, and an INDEX written through the live path would go with it) and then
+		// swap the generation in with ONE atomic rename. The tombstone below MUST come after this:
+		// a failed promote leaves the live memory unchanged, so the batch has to stay re-foldable.
+		atomicWrite(indexPath(staging.work), renderIndexFile(listTopics(staging.work)));
+		const promoteOutcome = runtime.commitStaging();
+		runtime.lastPromote = promoteOutcome;
+		if (promoteOutcome === "failed") {
+			// commitStaging already discarded the work generation: the run's writes are not visible
+			// through the live root ⇒ keep the batch un-tombstoned (thrown as a worker failure below).
+			throw new Error("consolidator staging promote failed (live memory unchanged; batch kept for re-fold)");
+		}
+
 		if (toDrop.length > 0) {
 			const coversUpToId = lastSourceEntryId(branch);
 			if (coversUpToId) {
@@ -162,9 +197,10 @@ async function dispatchConsolidator(
 			}
 		}
 
-		// Re-render INDEX.md so live ls/grep truth leads the pushed map (design risk 3).
-		atomicWrite(indexPath(runtime.memoryRoot), renderIndexFile(listTopics(runtime.memoryRoot)));
-
+		// #11: the batch was drained into durable memory, so the barrier may render on top of this
+		// without a retry. Recorded here (after the tombstone) rather than in the finally, because the
+		// finally also runs for stale/aborted runs that produced no outcome at all.
+		runtime.lastConsolidation = { ok: true, runId, at: Date.now() };
 		logIfEnabled(runtime.config.debugLog, "consolidator.settle", { outcome: "ok", exitCode: exit.code, dropped: toDrop.length, handed: promote.length }, runId);
 		runtime.status.workerDone(runId, toDrop.length);
 		clearWorkerFailures(runtime); // P0.4: any success proves recovery
@@ -189,11 +225,17 @@ async function dispatchConsolidator(
 			return;
 		}
 		runtime.lastWorkerError = message;
+		// #11: a genuine failure — never a stale discard, which returns above — is what earns a barrier
+		// its single retry. The background path ignores this field entirely.
+		runtime.lastConsolidation = { ok: false, runId, at: Date.now() };
 		noteWorkerFailure(runtime, ctx.hasUI && ctx.ui ? (m, l) => ctx.ui!.notify(m, l) : undefined); // P0.4
 		logIfEnabled(runtime.config.debugLog, "consolidator.settle", { outcome: "error", error: message }, runId);
 		runtime.status.workerError(runId);
 		if (ctx.hasUI) ctx.ui?.notify(`om: consolidator failed: ${message}`, "error");
 	} finally {
+		// No-op after a successful commit or an in-place run; drops the work generation otherwise, so
+		// a failed/aborted/stale run can never leave a half-written generation behind.
+		runtime.abortStaging();
 		runtime.consolidatorController = undefined;
 		runtime.consolidatorInFlight = false;
 		// P0.1: never re-drive the queue from a completion that no longer belongs to this session.

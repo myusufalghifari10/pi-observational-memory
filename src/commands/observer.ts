@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { entryIndexForId, rawTokensAfterIndex, type Entry } from "../ledger/index.js";
-import { evaluateObserverTriggers, effectiveWatermarkId } from "../hooks/observer-trigger.js";
+import { clearWorkerFailures, evaluateObserverTriggers, effectiveWatermarkId } from "../hooks/observer-trigger.js";
 import type { Runtime } from "../runtime.js";
 
 /**
@@ -21,12 +21,15 @@ export function registerObserverCommand(pi: ExtensionAPI, runtime: Runtime): voi
 				return;
 			}
 			if (runtime.pipelinePaused) {
-				// The breaker only clears on a worker success or an explicit `/om off`→`on`.
+				// A manual command is an EXPLICIT user intent, so it clears a paused pipeline (P0.4): the
+				// breaker stops AUTOMATIC dispatch loops, not the operator. Capture the streak before
+				// clearing so the notice tells the truth, then fall through and actually run.
+				const streak = runtime.workerFailureStreak;
+				clearWorkerFailures(runtime);
 				notice(
-					"om: pipeline paused (3 consecutive worker failures) — fix the cause (e.g. models/credentials), then run /om off and /om on to reset",
+					`om: pipeline paused (${streak} consecutive worker failures) — breaker reset, retrying observation`,
 					"warning",
 				);
-				return;
 			}
 			if (runtime.observerSlotsAvailable <= 0) {
 				notice("om: observer busy (concurrency limit) — try again once a worker finishes", "warning");

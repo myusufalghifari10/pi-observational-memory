@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { applyOmMode, applyOmModelChange, writeSettingsAtomic } from "../src/commands/switching.js";
+import { applyOmModelChange, writeSettingsAtomic } from "../src/commands/switching.js";
 
 const SETTINGS_KEY = "observational-memory";
 
@@ -20,42 +20,8 @@ function baseSettings(): Record<string, unknown> {
 	};
 }
 
-describe("applyOmMode", () => {
-	it("defaults to sequential on a fresh config (applyOmMode({}, false) creates serialWorkers=true)", () => {
-		const next = applyOmMode({}, false);
-		expect((next[SETTINGS_KEY] as { serialWorkers: boolean }).serialWorkers).toBe(true);
-	});
-
-	it("flips to parallel (parallel=true sets serialWorkers=false)", () => {
-		const next = applyOmMode(baseSettings(), true);
-		expect((next[SETTINGS_KEY] as { serialWorkers: boolean }).serialWorkers).toBe(false);
-	});
-
-	it("flips back to sequential (parallel=false sets serialWorkers=true)", () => {
-		const parallel = applyOmMode(baseSettings(), true);
-		const back = applyOmMode(parallel, false);
-		expect((back[SETTINGS_KEY] as { serialWorkers: boolean }).serialWorkers).toBe(true);
-	});
-
-	it("creates the observational-memory key when absent", () => {
-		const next = applyOmMode({}, true);
-		expect((next[SETTINGS_KEY] as { serialWorkers: boolean }).serialWorkers).toBe(false);
-	});
-
-	it("preserves every other settings key", () => {
-		const next = applyOmMode(baseSettings(), true);
-		expect(next.unrelated).toEqual({ keep: 1 });
-		expect((next[SETTINGS_KEY] as { chunkTokens: number }).chunkTokens).toBe(15000);
-	});
-
-	it("does not mutate the input object", () => {
-		const settings = baseSettings();
-		const snapshot = JSON.parse(JSON.stringify(settings));
-		applyOmMode(settings, true);
-		applyOmMode(settings, false);
-		expect(settings).toEqual(snapshot);
-	});
-});
+// applyOmMode was removed with the parallel mode: the pipeline is strictly sequential, so there
+// is no mode left to flip (see tests/serial-workers.test.ts for the forced-true normalization).
 
 describe("applyOmModelChange", () => {
 	it("changes a single role only", () => {

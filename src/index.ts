@@ -75,8 +75,10 @@ export default function observationalMemory(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
-		runtime.status.detach();
-		runtime.abortAllWorkers();
+		// Teardown invalidates in-flight workers FIRST (generation bump), so a completion that lands
+		// during teardown is discarded as stale instead of burning circuit-breaker state or notifying
+		// through a dead ctx — see Runtime.shutdown (P0.1 / audit N4).
+		runtime.shutdown();
 	});
 
 	pi.registerCommand("om", {

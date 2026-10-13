@@ -108,9 +108,20 @@ export function spawnWorker(opts: {
 	});
 }
 
-export type ObserverLaunchEnv = {
-	/** Absolute `.memory/<sessionId>/` root — IPC files and the consolidator sandbox live here. */
-	memoryRoot: string;
+export type WorkerLaunchEnv = {
+	/**
+	 * Absolute root the worker's sandbox resolves against (`OM_MEMORY_DIR`) and the cwd it runs in.
+	 * Normally the live `.memory/<sessionId>/`; during a STAGED consolidation (S3) it is the work
+	 * generation, so the run's writes land outside the live memory until they are promoted.
+	 */
+	sandboxRoot: string;
+	/**
+	 * Root that owns the transient `.runs/` IPC (result + cost files). Defaults to `sandboxRoot`;
+	 * a staged run keeps it on the LIVE root so the orchestrator reads a worker's cost/result
+	 * through the same path it always has — the work generation is deliberately not trusted for
+	 * IPC (it is discarded on failure).
+	 */
+	ipcRoot?: string;
 	runId: string;
 };
 
@@ -119,15 +130,16 @@ export type ObserverLaunchEnv = {
  * passed via env/file — it is the `pi -p` prompt (recorded user message) so the run stays
  * faithfully inspectable on resume.
  */
-export function buildWorkerEnv(role: "observer" | "consolidator", opts: ObserverLaunchEnv): NodeJS.ProcessEnv {
+export function buildWorkerEnv(role: "observer" | "consolidator", opts: WorkerLaunchEnv): NodeJS.ProcessEnv {
+	const ipcRoot = opts.ipcRoot ?? opts.sandboxRoot;
 	return {
 		...process.env,
 		OM_WORKER: role,
 		OM_RUN_ID: opts.runId,
-		OM_RESULT_PATH: runResultPath(opts.memoryRoot, opts.runId),
+		OM_RESULT_PATH: runResultPath(ipcRoot, opts.runId),
 		// Per-run cost handoff: the worker extension writes pi's built-in usage.cost.total here.
-		OM_COST_PATH: runCostPath(opts.memoryRoot, opts.runId),
+		OM_COST_PATH: runCostPath(ipcRoot, opts.runId),
 		// Sandbox root for the consolidator's scoped file tools (design risk 6).
-		OM_MEMORY_DIR: opts.memoryRoot,
+		OM_MEMORY_DIR: opts.sandboxRoot,
 	};
 }

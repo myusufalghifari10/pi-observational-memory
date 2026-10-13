@@ -9,7 +9,7 @@ vi.mock("../src/spawn/launch.js", async (importOriginal) => {
 });
 
 import { registerObserverCommand } from "../src/commands/observer.js";
-import { recordSliceFailure } from "../src/hooks/observer-trigger.js";
+import { CIRCUIT_BREAKER_THRESHOLD, recordSliceFailure } from "../src/hooks/observer-trigger.js";
 import { Runtime } from "../src/runtime.js";
 import { spawnWorker } from "../src/spawn/launch.js";
 import { textCustomMessage } from "./fixtures/session.js";
@@ -108,12 +108,17 @@ describe("/om:observer — force an observer run below the chunk threshold", () 
 		expect(runtime.failedSlices).toEqual([]);
 	});
 
-	it("refuses to dispatch while the pipeline is paused, and names the recovery path", async () => {
+	it("clears a paused pipeline and dispatches (a manual command is an explicit user intent)", async () => {
+		runtime.workerFailureStreak = CIRCUIT_BREAKER_THRESHOLD;
 		runtime.pipelinePaused = true;
 		await handler("", makeCtx());
-		expect(mockedSpawn).not.toHaveBeenCalled();
-		expect(notified("paused")).toBe(true);
-		expect(notified("/om off")).toBe(true);
+		// #10: the breaker gates AUTOMATIC dispatch, not the operator — so the command resets it
+		// and actually runs, instead of silently doing nothing behind a `/om off`→`on` instruction.
+		expect(mockedSpawn).toHaveBeenCalledTimes(1);
+		expect(runtime.pipelinePaused).toBe(false);
+		expect(runtime.workerFailureStreak).toBe(0);
+		expect(notified(`pipeline paused (${CIRCUIT_BREAKER_THRESHOLD} consecutive worker failures)`)).toBe(true);
+		expect(notified("breaker reset")).toBe(true);
 	});
 
 	it("refuses to dispatch when om is off", async () => {

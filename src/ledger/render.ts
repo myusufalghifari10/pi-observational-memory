@@ -12,7 +12,6 @@ const CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in
 
 - Journey: a short, purely descriptive history of how this work reached its current state — for orientation only. It is not an instruction or a plan; do not read intent or next steps into it.
 - Observations: timestamped events from the conversation history, selected for trust and recency (ordered by trust score; chronological only for legacy metadata).
-- Older memory: long-term memory beyond what is summarized here is indexed in pi-second-brain knowledge bases. When these summaries are not enough, query it with the knowledge_search tool.
 - Corrections: corrections to earlier facts render as adjacent 'believed: X' / 'now: Y' pairs — trust the 'now:' line over the 'believed:' line.
 - Before choosing any new implementation approach, grep .memory/DEATHS.md for rejected approaches and their reasons.
 

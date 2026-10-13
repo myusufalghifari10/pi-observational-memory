@@ -38,8 +38,10 @@ describe("serialWorkers slot math (Runtime.observerSlotsAvailable)", () => {
 		expect(runtime.workerBusy).toBe(true);
 	});
 
-	it("non-serial behavior unchanged: parallel observers, consolidator does not close slots", () => {
-		const runtime = runtimeWith(); // serialWorkers defaults false
+	it("non-serial slot math still exists as a defensive branch (unreachable via settings)", () => {
+		// `serialWorkers: false` can no longer come from settings.json (normalize forces true),
+		// but the parallel branch is kept in Runtime as a defensive code path — so it stays tested.
+		const runtime = runtimeWith({ serialWorkers: false });
 		expect(runtime.observerSlotsAvailable).toBe(runtime.config.observerConcurrency);
 		runtime.observersInFlight.set("r1", { controller: new AbortController(), coversUpToId: "raw-1" });
 		expect(runtime.observerSlotsAvailable).toBe(runtime.config.observerConcurrency - 1);
@@ -61,12 +63,16 @@ describe("shouldYieldToConsolidator (serial priority rule)", () => {
 });
 
 describe("serialWorkers config normalization", () => {
-	it("accepts an explicit boolean", () => {
+	it("forces true: a settings.json `false` can no longer re-enable parallel observers", () => {
 		expect(normalizeSettingsConfig({ serialWorkers: true }, DEFAULTS).serialWorkers).toBe(true);
-		expect(normalizeSettingsConfig({ serialWorkers: false }, DEFAULTS).serialWorkers).toBe(false);
+		expect(normalizeSettingsConfig({ serialWorkers: false }, DEFAULTS).serialWorkers).toBe(true);
 	});
 
-	it("defaults to false (parallel) and ignores non-boolean garbage", () => {
+	it("DEFAULTS itself is sequential", () => {
+		expect(DEFAULTS.serialWorkers).toBe(true);
+	});
+
+	it("leaves the key unset when absent and ignores non-boolean garbage", () => {
 		expect(normalizeSettingsConfig({}, DEFAULTS).serialWorkers).toBeUndefined();
 		expect(normalizeSettingsConfig({ serialWorkers: "yes" }, DEFAULTS).serialWorkers).toBeUndefined();
 		expect(normalizeSettingsConfig({ serialWorkers: 1 }, DEFAULTS).serialWorkers).toBeUndefined();

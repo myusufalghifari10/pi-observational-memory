@@ -69,12 +69,23 @@ describe("P4.4 death clustering (prompt)", () => {
 	});
 });
 
-describe("buildWorkerEnv(consolidator)", () => {
+	describe("buildWorkerEnv(consolidator)", () => {
 	it("sets role, run id, and the .memory sandbox root", () => {
-		const env = buildWorkerEnv("consolidator", { memoryRoot: "/proj/.memory/sess-1", runId: "c1" });
+		const env = buildWorkerEnv("consolidator", { sandboxRoot: "/proj/.memory/sess-1", runId: "c1" });
 		expect(env.OM_WORKER).toBe("consolidator");
 		expect(env.OM_RUN_ID).toBe("c1");
 		expect(env.OM_MEMORY_DIR).toBe("/proj/.memory/sess-1");
+	});
+
+	it("keeps .runs/ IPC on ipcRoot while the sandbox points at a staging generation", () => {
+		const env = buildWorkerEnv("consolidator", {
+			sandboxRoot: "/proj/.memory/sess-1.g2",
+			ipcRoot: "/proj/.memory/sess-1",
+			runId: "c2",
+		});
+		expect(env.OM_MEMORY_DIR).toBe("/proj/.memory/sess-1.g2");
+		expect(env.OM_COST_PATH).toBe("/proj/.memory/sess-1/.runs/c2.cost.json");
+		expect(env.OM_RESULT_PATH).toBe("/proj/.memory/sess-1/.runs/c2.result.json");
 	});
 });
 

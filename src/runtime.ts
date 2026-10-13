@@ -1,6 +1,25 @@
 import { type Config, DEFAULTS, loadConfig } from "./config.js";
 import { foldLedger, poolTokens, rawTokensSinceObservationCoverage, sumSessionCost, type Entry } from "./ledger/index.js";
+import {
+	beginStaging as beginStagingRoots,
+	discardStaging,
+	promoteStaging,
+	type PromoteOutcome,
+	type StagingRoots,
+} from "./memory/paths.js";
 import { StatusController } from "./ui/status-controller.js";
+
+/** S6: timings of one compaction barrier (see `Runtime.lastBarrier`). */
+export type BarrierTelemetry = {
+	/** When the barrier started (epoch ms). */
+	at: number;
+	/** Time spent waiting for in-flight observers (plus the cutoff re-snap) before consolidating. */
+	observerWaitMs: number;
+	/** Time spent running the consolidator inside the barrier; undefined when none was due. */
+	consolidationMs: number | undefined;
+	/** Promote outcome of that consolidation; undefined when none ran. */
+	promote: PromoteOutcome | undefined;
+};
 
 /**
  * In-process orchestrator state. Event-driven only — no daemon/timer beyond the status
@@ -61,6 +80,44 @@ export class Runtime {
 	 */
 	consolidatorInFlight = false;
 	consolidatorController: AbortController | undefined;
+
+	/**
+	 * S2: the in-flight consolidator TASK (the promise behind `consolidatorInFlight`), tracked so
+	 * the compaction barrier can await a settled worker state via `whenConsolidatorIdle()`.
+	 */
+	consolidatorTask: Promise<void> | undefined;
+
+	/**
+	 * S2 anti-starvation: true for the whole compaction barrier (wait observers → run the
+	 * consolidator → render). Observer dispatch yields while it is set, so chunks that keep
+	 * arriving during the wait cannot prevent the barrier from ever seeing a settled state.
+	 */
+	compactionBarrier = false;
+
+	/** S6: outcome of the most recent staged promote (merged into `lastBarrier` by the hook). */
+	lastPromote: PromoteOutcome | undefined;
+
+	/** S6: timings of the most recent compaction barrier, surfaced by /om:status. */
+	lastBarrier: BarrierTelemetry | undefined;
+
+	/**
+	 * #11: outcome of the most recent consolidator run. Cleared the moment a run is dispatched and
+	 * set in every settle path of `dispatchConsolidator` (never by observers), so a reader always
+	 * sees THIS run's result rather than a stale one from an earlier attempt.
+	 *
+	 * The compaction barrier reads it to give a consolidation that failed while the barrier was
+	 * pending exactly ONE retry before rendering. A failure on the BACKGROUND path is different:
+	 * it neither retries nor triggers a compaction (the batch simply stays re-foldable).
+	 */
+	lastConsolidation: { ok: boolean; runId?: string; at: number } | undefined;
+
+	/**
+	 * S3: the work generation a consolidator run is currently writing into, when staging is
+	 * active. `memoryRoot` is ALWAYS the logical live path — the render, status, `.runs/` IPC and
+	 * every path helper keep resolving through it; only the worker's cwd + `OM_MEMORY_DIR` point
+	 * at `staging.work`. Cleared by `commitStaging()` / `abortStaging()`.
+	 */
+	staging: StagingRoots | undefined;
 
 	/**
 	 * coversUpToId of the most-recent chunk DISPATCHED (committed or still in flight). Combined
@@ -190,6 +247,18 @@ export class Runtime {
 		this.status.setCost(costUsd, runs);
 	}
 
+	/**
+	 * P0.1 (audit N4): session teardown is a session boundary. Invalidate in-flight workers BEFORE
+	 * aborting them, so a completion that lands during teardown is discarded as stale — instead of
+	 * burning circuit-breaker state and calling `ui.notify` through a ctx that is already dead
+	 * (the documented crash class).
+	 */
+	shutdown(): void {
+		this.generation += 1;
+		this.status.detach();
+		this.abortAllWorkers();
+	}
+
 	/** Abort and forget all in-flight workers (session shutdown / disable). */
 	abortAllWorkers(): void {
 		this.cancelPendingToasts();
@@ -200,6 +269,49 @@ export class Runtime {
 		this.consolidatorController?.abort();
 		this.consolidatorController = undefined;
 		this.consolidatorInFlight = false;
+		// A staged run that is being torn down is discarded, never promoted: the batch stays
+		// un-tombstoned, so the next consolidation re-folds it (duplicate work, never lost data).
+		this.abortStaging();
+	}
+
+	/**
+	 * Begin a staged consolidation of this session's memory root. The caller must spawn the
+	 * consolidator with `cwd`/`OM_MEMORY_DIR` = `roots.work`, keep every `.runs/` IPC path on the
+	 * LIVE root, and finish with `commitStaging()` (clean exit) or `abortStaging()` (any other
+	 * outcome). Promote only while no worker is in flight — the previous generation is deleted.
+	 * Returns `staged: false` (work === live, in-place fallback) when staging is unavailable.
+	 */
+	beginStaging(): StagingRoots {
+		this.abortStaging(); // never leave a second work generation behind
+		const roots: StagingRoots = this.memoryRoot
+			? beginStagingRoots(this.memoryRoot)
+			: { live: "", work: "", staged: false };
+		this.staging = roots.staged ? roots : undefined;
+		return roots;
+	}
+
+	/**
+	 * Commit the consolidator's staged run. `promoted` = atomic swap done; `in-place` = staging was
+	 * unavailable, so the writes are already durable in the live root (drop the batch); `failed` =
+	 * the live root is unchanged ⇒ the caller must KEEP the batch un-tombstoned for a re-fold.
+	 */
+	commitStaging(): PromoteOutcome {
+		const roots = this.staging;
+		this.staging = undefined;
+		const outcome = promoteStaging(roots);
+		// A failed promote leaves the work generation behind. Drop it: a higher-numbered `.g<N>`
+		// sibling would otherwise be adopted by the crash-recovery branch of `ensureGenerationalRoot`
+		// (which re-points the root at the NEWEST generation) as if it were live memory — and it
+		// holds a partially-written run.
+		if (outcome === "failed") discardStaging(roots);
+		return outcome;
+	}
+
+	/** Drop the work generation — the live memory is left byte-identical. Safe to call twice. */
+	abortStaging(): void {
+		const roots = this.staging;
+		this.staging = undefined;
+		discardStaging(roots);
 	}
 
 	/** Track an observer task for the lifetime of its async run. */
@@ -213,6 +325,36 @@ export class Runtime {
 		while (this.observerTasks.size > 0) {
 			await Promise.allSettled([...this.observerTasks]);
 		}
+	}
+
+	/** Track a consolidator task for the lifetime of its async run (see `whenConsolidatorIdle`). */
+	trackConsolidatorTask(task: Promise<void>): void {
+		this.consolidatorTask = task;
+		// Clearing happens in a reaction registered BEFORE any waiter's `allSettled`, so a waiter
+		// woken by the settle sees the field already cleared (and can never spin).
+		void task.finally(() => {
+			if (this.consolidatorTask === task) this.consolidatorTask = undefined;
+		});
+	}
+
+	/**
+	 * Resolve once no consolidator run is in flight. Loops because a settled task may already have
+	 * pumped a successor (the barrier waits for the LAST one, not an arbitrary snapshot).
+	 */
+	async whenConsolidatorIdle(): Promise<void> {
+		while (this.consolidatorTask) {
+			await Promise.allSettled([this.consolidatorTask]);
+		}
+	}
+
+	/**
+	 * S2: resolve once EVERY worker has settled — observers first (so their just-committed
+	 * observations are in the ledger), then the consolidator (so its topic-file writes are either
+	 * promoted or dropped). This is the state the compaction render is a pure function of.
+	 */
+	async whenWorkersIdle(): Promise<void> {
+		await this.whenObserversIdle();
+		await this.whenConsolidatorIdle();
 	}
 
 	/** True when any worker subprocess (observer or consolidator) is in flight. */

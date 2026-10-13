@@ -438,6 +438,10 @@ describe("P0.11 stale-ctx teardown guard (appendEntry throws after session repla
 
 	it("multi-chunk case pins the loop-kill: swallowed commits never re-dispatch (no infinite spawn)", async () => {
 		const runtime = makeRuntime();
+		// This test pins the pump's loop-kill across SIMULTANEOUS in-flight chunks, so it needs the
+		// non-serial slot math. Production is always sequential (config forces serialWorkers true);
+		// the parallel branch survives only as a defensive code path.
+		runtime.config.serialWorkers = false;
 		const twoBranch = [
 			rawMessage("e1", "first chunk body for the observer clock to slice"),
 			rawMessage("e2", "second chunk body for the observer clock to slice"),

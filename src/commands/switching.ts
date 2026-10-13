@@ -1,10 +1,13 @@
 /**
- * OM mode & model switcher commands: /om-parallel, /om-sequential, /om-change-model.
+ * OM commands: /om-sequential (informational) and /om-change-model.
  *
- * Pure helpers on top (tested by tests/switching.test.ts), thin interactive flow below.
- * All three persist to the GLOBAL ~/.pi/agent/settings.json (atomic tmp+rename, .bak backup —
- * same as the subagents-change-model reference) AND apply to runtime.config in memory so the
- * current session picks the change up without /reload. They work regardless of the /om gate.
+ * The worker pipeline is ALWAYS sequential — one worker subprocess (observer OR consolidator) at
+ * a time; see `config.serialWorkers`. There is no parallel mode to switch back to, so
+ * /om-sequential writes nothing and only explains the mode.
+ *
+ * /om-change-model persists to the GLOBAL ~/.pi/agent/settings.json (atomic tmp+rename, .bak
+ * backup — same as the subagents-change-model reference) AND applies to runtime.config in memory
+ * so the current session picks the change up without /reload. It works regardless of the /om gate.
  * Note: a project .pi/settings.json still overrides the global file on the next config load
  * (documented in README).
  */
@@ -22,14 +25,6 @@ const SETTINGS_KEY = "observational-memory";
 const DEFAULT_SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
-
-/** Flip the worker mode: parallel=true ⇒ serialWorkers=false (and back). Never mutates input. */
-export function applyOmMode(settings: Settings, parallel: boolean): Settings {
-	const next = structuredClone(settings);
-	const om = isRecord(next[SETTINGS_KEY]) ? next[SETTINGS_KEY] : {};
-	next[SETTINGS_KEY] = { ...om, serialWorkers: !parallel };
-	return next;
-}
 
 /**
  * Set observational-memory.models.<role> = { provider, id, thinking } for each role,
@@ -95,47 +90,25 @@ function currentSpec(settings: Settings, role: "observer" | "consolidator", runt
 // ── Command registration ──────────────────────────────────────────────────────
 
 export function registerSwitchingCommands(pi: ExtensionAPI, runtime: Runtime): void {
-	registerModeCommand(pi, runtime, "om-parallel", true,
-		"Parallel observers (serialWorkers=false): persist and apply now");
-	registerModeCommand(pi, runtime, "om-sequential", false,
-		"One worker at a time (serialWorkers=true): persist and apply now");
+	registerSequentialInfoCommand(pi, runtime);
 	registerModelCommand(pi, runtime);
 }
 
-function registerModeCommand(
-	pi: ExtensionAPI,
-	runtime: Runtime,
-	name: "om-parallel" | "om-sequential",
-	parallel: boolean,
-	description: string,
-): void {
-	pi.registerCommand(name, {
-		description,
+/**
+ * `/om-sequential` is informational only: sequential is the one and only mode. The command is
+ * kept (rather than deleted) so the old muscle memory lands on an explanation instead of
+ * "unknown command" — but it writes nothing, because there is no parallel mode to return to.
+ */
+function registerSequentialInfoCommand(pi: ExtensionAPI, runtime: Runtime): void {
+	pi.registerCommand("om-sequential", {
+		description: "Report the worker mode (sequential is mandatory: one worker at a time)",
 		handler: async (_args: string, ctx: any) => {
-			let settings: Settings;
-			try {
-				settings = readSettings(DEFAULT_SETTINGS_PATH);
-			} catch (error) {
-				if (ctx.hasUI) ctx.ui.notify(`Cannot parse ${DEFAULT_SETTINGS_PATH}: ${errorMessage(error)}`, "error");
-				return;
-			}
-			const next = applyOmMode(settings, parallel);
-			try {
-				writeSettingsAtomic(next, DEFAULT_SETTINGS_PATH);
-			} catch (error) {
-				if (ctx.hasUI) ctx.ui.notify(`Failed to write ${DEFAULT_SETTINGS_PATH}: ${errorMessage(error)}`, "error");
-				return;
-			}
+			if (!ctx.hasUI) return;
 			runtime.ensureConfig(ctx.cwd);
-			runtime.config.serialWorkers = !parallel;
-			if (ctx.hasUI) {
-				ctx.ui.notify(
-					parallel
-						? "om: parallel mode (serialWorkers=false) — observers run with concurrency"
-						: "om: sequential mode (serialWorkers=true) — one worker at a time, observers queue behind the running worker",
-					"info",
-				);
-			}
+			ctx.ui.notify(
+				"om: sequential mode (mandatory) — one worker at a time; observers queue behind the running worker, and compaction waits for in-flight work before folding memory",
+				"info",
+			);
 		},
 	});
 }
