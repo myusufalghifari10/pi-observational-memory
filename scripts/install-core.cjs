@@ -139,7 +139,9 @@ if (register) {
 		tailTokens: 30000,
 		journeyTargetTokens: 1000,
 		observerConcurrency: 4,
-		serialWorkers: false,
+		// Forced to true by the extension (the pipeline is sequential-only); seeded as the
+		// effective value so a fresh settings block does not claim a mode that no longer exists.
+		serialWorkers: true,
 		resumeAfterMidRunCompaction: true,
 		passive: false,
 		debugLog: false,
