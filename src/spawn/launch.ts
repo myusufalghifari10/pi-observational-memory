@@ -80,19 +80,45 @@ export function spawnWorker(opts: {
 	env: NodeJS.ProcessEnv;
 	signal?: AbortSignal;
 }): Promise<WorkerExit> {
-	const [command, ...rest] = opts.argv;
+	const [command, ...rawRest] = opts.argv;
+	const rest = [...rawRest];
+	// Linux enforces MAX_ARG_STRLEN = 131,072 bytes (128 KiB) per single argv element; a 30k+ token
+	// chunk (~130-160 KB) passed as `-p <prompt>` in argv fails immediately with `spawn E2BIG`.
+	// Extract the `-p` prompt payload and pipe it via stdin (`pi -p` reads piped stdin into the
+	// same recorded initial user message via readPipedStdin/buildInitialMessage).
+	let stdinPrompt: string | undefined;
+	const pIdx = rest.lastIndexOf("-p");
+	if (pIdx !== -1 && pIdx + 1 < rest.length) {
+		const candidate = rest[pIdx + 1];
+		if (
+			candidate !== undefined &&
+			!candidate.startsWith("@") &&
+			(!candidate.startsWith("-") || candidate.startsWith("---"))
+		) {
+			stdinPrompt = candidate;
+			rest.splice(pIdx + 1, 1);
+		}
+	}
 	mkdirSync(opts.cwd, { recursive: true });
 	return new Promise<WorkerExit>((resolvePromise) => {
 		const proc = spawn(command, rest, {
 			cwd: opts.cwd,
 			env: opts.env,
-			stdio: ["ignore", "ignore", "pipe"],
+			stdio: [stdinPrompt !== undefined ? "pipe" : "ignore", "ignore", "pipe"],
 		});
+		if (stdinPrompt !== undefined && proc.stdin) {
+			proc.stdin.on("error", () => {
+				// Ignore EPIPE if the child exits before draining stdin.
+			});
+			proc.stdin.end(stdinPrompt, "utf8");
+		}
 		let stderr = "";
 		proc.stderr?.on("data", (d: Buffer) => {
 			stderr += d.toString();
 		});
-		proc.on("error", () => resolvePromise({ code: 1, signal: null, stderr: stderr || "spawn error" }));
+		proc.on("error", (err: Error) =>
+			resolvePromise({ code: 1, signal: null, stderr: stderr || err.message || "spawn error" }),
+		);
 		proc.on("close", (code, signal) => resolvePromise({ code, signal, stderr }));
 
 		if (opts.signal) {

@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { AGENT_EXTENSION_PATH, buildWorkerArgv, buildWorkerEnv, modelArg } from "../src/spawn/launch.js";
+import { AGENT_EXTENSION_PATH, buildWorkerArgv, buildWorkerEnv, modelArg, spawnWorker } from "../src/spawn/launch.js";
 import { readObserverResult, runResultPath, runsDir, writeObserverResult } from "../src/spawn/runs.js";
 import { registerObserverTool } from "../agent/observer/tool.js";
 
@@ -52,6 +52,37 @@ describe("launch argv + env", () => {
 
 	it("resolves run paths under the session memory root's .runs", () => {
 		expect(runsDir("/proj/.memory/sess-1")).toBe("/proj/.memory/sess-1/.runs");
+	});
+
+	it("pipes the -p prompt via stdin so >128 KiB prompts (30k-45k tokens) never fail with spawn E2BIG", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "om-e2big-"));
+		try {
+			// 200 KB prompt (~50,000 tokens), well above Linux MAX_ARG_STRLEN (131,072 bytes).
+			const hugePrompt = "chunk-line-".repeat(20_000);
+			const outPath = join(dir, "stdin-len.txt");
+			const stubPath = join(dir, "worker-stub.cjs");
+			writeFileSync(
+				stubPath,
+				`let n = 0;
+process.stdin.on("data", (c) => { n += c.length; });
+process.stdin.on("end", () => {
+	require("node:fs").writeFileSync(${JSON.stringify(outPath)}, String(n) + ":" + process.argv.slice(2).join(","));
+	process.exit(0);
+});`,
+				"utf-8",
+			);
+			const exit = await spawnWorker({
+				argv: [process.execPath, stubPath, "-n", "om-test", "-p", hugePrompt],
+				cwd: dir,
+				env: process.env,
+			});
+			expect(exit.code).toBe(0);
+			expect(exit.stderr).toBe("");
+			const recorded = readFileSync(outPath, "utf-8");
+			expect(recorded).toBe(`${Buffer.byteLength(hugePrompt, "utf8")}:-n,om-test,-p`);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
