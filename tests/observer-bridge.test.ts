@@ -60,6 +60,16 @@ describe("bridgeContextBlock", () => {
 		expect(block).toContain("===== END PREVIOUS CONTEXT =====");
 		expect(block).toContain("Do NOT re-observe");
 	});
+
+	it("includes compact Goal and Constraints from optional state for observer orientation", () => {
+		const block = bridgeContextBlock([obs("2026-09-21T01:00:00", "alpha")], {
+			body: "## Goal\nBuild OM v5\n## Constraints\n- no extra deps\n## Done\n- finished step 1",
+		})!;
+		expect(block).toContain("## Goal\nBuild OM v5");
+		expect(block).toContain("## Constraints\n- no extra deps");
+		expect(block).not.toContain("finished step 1");
+		expect(block).toContain("alpha");
+	});
 });
 
 describe("buildObserverPrompt", () => {

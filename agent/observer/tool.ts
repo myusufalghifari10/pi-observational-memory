@@ -28,6 +28,11 @@ export const RecordObservationsSchema = Type.Object({
 						"event | question | rejected | strat. Defaults to event.",
 				}),
 			),
+			sourceEntryId: Type.Optional(
+				Type.String({
+					description: "Optional id from the enclosing '[Source entry id: <id>]' block for exact provenance.",
+				}),
+			),
 		}),
 		{ description: "Batch of new observations. Call multiple times until the chunk is fully covered." },
 	),
@@ -72,7 +77,13 @@ export function registerObserverTool(pi: ExtensionAPI, resultPath: string): void
 				}
 				seen.add(key);
 				const kind = obs.kind ?? "event";
-				accumulated.push({ timestamp: obs.timestamp, content, kind });
+				const sourceEntryId = obs.sourceEntryId?.trim() || undefined;
+				accumulated.push({
+					timestamp: obs.timestamp,
+					content,
+					kind,
+					...(sourceEntryId ? { sourceEntryId } : {}),
+				});
 				added++;
 			}
 			flush();

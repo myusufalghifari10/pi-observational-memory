@@ -29,11 +29,19 @@ export function nowTimestamp(): string {
  * message is a deliberate assertion and must reach the observer verbatim.
  */
 export const MAX_RECORD_CONTENT_CHARS = 40_000;
+export const MAX_TOOL_CALL_ARGS_CHARS = 4_000;
 
 export function truncateRecordContent(content: string): string {
 	if (content.length <= MAX_RECORD_CONTENT_CHARS) return content;
 	const head = content.slice(0, MAX_RECORD_CONTENT_CHARS);
 	const dropped = content.length - MAX_RECORD_CONTENT_CHARS;
+	return `${head} … [truncated ${dropped} chars]`;
+}
+
+export function truncateToolCallArgs(serialized: string): string {
+	if (serialized.length <= MAX_TOOL_CALL_ARGS_CHARS) return serialized;
+	const head = serialized.slice(0, MAX_TOOL_CALL_ARGS_CHARS);
+	const dropped = serialized.length - MAX_TOOL_CALL_ARGS_CHARS;
 	return `${head} … [truncated ${dropped} chars]`;
 }
 
@@ -54,13 +62,11 @@ function textAndPlaceholders(content: unknown, options: { includeThinking?: bool
 		if (block.type === "thinking") {
 			if (options.includeThinking && typeof block.thinking === "string") {
 				parts.push(`[thinking: ${block.thinking}]`);
-				continue;
 			}
-			parts.push("[non-text content omitted]");
 			continue;
 		}
 		if (block.type === "toolCall" && typeof block.name === "string") {
-			parts.push(`[${block.name}(${JSON.stringify(block.arguments ?? {})})]`);
+			parts.push(`[${block.name}(${truncateToolCallArgs(JSON.stringify(block.arguments ?? {}))})]`);
 			continue;
 		}
 		parts.push("[non-text content omitted]");
@@ -86,7 +92,7 @@ export function serializeConversation(messages: Message[]): string {
 				return `[User @ ${time}]: ${textOnly(msg.content)}`;
 			}
 			if (msg.role === "assistant") {
-				const body = textAndPlaceholders(msg.content, { includeThinking: true })
+				const body = textAndPlaceholders(msg.content, { includeThinking: false })
 					.split("\n")
 					.filter(Boolean)
 					.join("\n");

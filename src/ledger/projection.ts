@@ -62,7 +62,8 @@ function foldProjection(entries: Entry[], boundary: ProjectionBoundary): Project
 	const seen = new Set<string>();
 	const dropped = new Set<string>();
 
-	for (const entry of entries) {
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i];
 		if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, boundaryIdx)) {
 			for (const observation of entry.data.observations) {
 				if (seen.has(observation.timestamp)) continue;
@@ -71,8 +72,16 @@ function foldProjection(entries: Entry[], boundary: ProjectionBoundary): Project
 			}
 			continue;
 		}
-		if (isObservationsDroppedEntry(entry) && isCoveredAtOrBefore(entry, indexes, boundaryIdx)) {
-			for (const timestamp of entry.data.observationTimestamps) dropped.add(timestamp);
+		if (isObservationsDroppedEntry(entry)) {
+			const applyDrop =
+				boundary.kind === "beforeEntry" ||
+				boundary.kind === "tip" ||
+				(boundary.kind === "entry" &&
+					boundaryIdx >= 0 &&
+					(i <= boundaryIdx || isCoveredAtOrBefore(entry, indexes, boundaryIdx)));
+			if (applyDrop) {
+				for (const timestamp of entry.data.observationTimestamps) dropped.add(timestamp);
+			}
 		}
 	}
 

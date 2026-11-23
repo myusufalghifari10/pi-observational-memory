@@ -46,6 +46,19 @@ export const STATE_FILENAME = "STATE.md";
  */
 export const DEATHS_FILENAME = "DEATHS.md";
 
+/** Special non-topic markdown files under `.memory/<sessionId>/` excluded from `listTopics`. */
+export const RESERVED_MEMORY_FILENAMES = new Set([
+	INDEX_FILENAME,
+	JOURNEY_FILENAME,
+	STATE_FILENAME,
+	DEATHS_FILENAME,
+]);
+
+/** Strip a staging `.g<N>` suffix from a memory root path so emitted paths are always logical. */
+export function stripGenerationSuffix(rootPath: string): string {
+	return rootPath.replace(/\.g\d+$/, "");
+}
+
 /** The project-level `.memory/` base. Per-session roots live one level below it. */
 export function memoryBaseDir(cwd: string): string {
 	return join(cwd, ".memory");
@@ -292,16 +305,17 @@ export function parseFrontMatter(content: string): { front: TopicFrontMatter; bo
 }
 
 /**
- * List parsed topic files (every `*.md` except INDEX.md/JOURNEY.md) under a session memory
+ * List parsed topic files (every `*.md` except reserved special files) under a session memory
  * root, sorted by filename. Each topic's `path` is rendered relative to the project cwd (e.g.
  * `.memory/<sessionId>/auth.md`) so the master can `read`/`grep` it directly from the map.
  */
 export function listTopics(root: string): Topic[] {
 	if (!existsSync(root)) return [];
-	const cwd = resolve(root, "..", "..");
+	const logicalRoot = stripGenerationSuffix(root);
+	const cwd = resolve(logicalRoot, "..", "..");
 	const topics: Topic[] = [];
 	for (const filename of readdirSync(root)) {
-		if (!filename.endsWith(".md") || filename === INDEX_FILENAME || filename === JOURNEY_FILENAME) continue;
+		if (!filename.endsWith(".md") || RESERVED_MEMORY_FILENAMES.has(filename)) continue;
 		let content: string;
 		try {
 			content = readFileSync(join(root, filename), "utf-8");
@@ -309,7 +323,7 @@ export function listTopics(root: string): Topic[] {
 			continue;
 		}
 		const { front } = parseFrontMatter(content);
-		topics.push({ ...front, path: relative(cwd, join(root, filename)), filename });
+		topics.push({ ...front, path: relative(cwd, join(logicalRoot, filename)), filename });
 	}
 	topics.sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0));
 	return topics;
@@ -327,7 +341,8 @@ export type Strat = Topic;
 export function listStrats(root: string): Strat[] {
 	const dir = join(root, "strats");
 	if (!existsSync(dir)) return [];
-	const cwd = resolve(root, "..", "..");
+	const logicalRoot = stripGenerationSuffix(root);
+	const cwd = resolve(logicalRoot, "..", "..");
 	const strats: Strat[] = [];
 	for (const filename of readdirSync(dir)) {
 		if (!filename.endsWith(".md") || filename.startsWith(".")) continue;
@@ -338,7 +353,7 @@ export function listStrats(root: string): Strat[] {
 			continue;
 		}
 		const { front } = parseFrontMatter(content);
-		strats.push({ ...front, path: relative(cwd, join(dir, filename)), filename });
+		strats.push({ ...front, path: relative(cwd, join(logicalRoot, "strats", filename)), filename });
 	}
 	strats.sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0));
 	return strats;

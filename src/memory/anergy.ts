@@ -13,8 +13,8 @@
  * error while checking counts as PASS (only definite absence demotes — a false demotion that
  * hides healthy memory is worse than a missed drift flag).
  */
-import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import type { Observation } from "../ledger/types.js";
 import type { Topic } from "./paths.js";
 
@@ -22,6 +22,61 @@ import type { Topic } from "./paths.js";
 const MAX_ASSERTIONS_PER_TOPIC = 20;
 /** Bound the file read when searching for a `path#symbol` assertion. */
 const MAX_SYMBOL_SCAN_BYTES = 256 * 1024;
+/** Bound depth-1 + depth-2 sub-repo discovery per projectCwd. */
+const SUBDIR_CACHE_TTL_MS = 5_000;
+const MAX_SCAN_DIRS = 500;
+const subDirCache = new Map<string, { dirs: string[]; at: number }>();
+
+function readChildDirs(parent: string): string[] {
+	try {
+		return readdirSync(parent, { withFileTypes: true })
+			.filter((d) => d.isDirectory() && !d.name.startsWith(".") && d.name !== "node_modules")
+			.map((d) => d.name)
+			.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+			.map((name) => join(parent, name));
+	} catch {
+		return [];
+	}
+}
+
+function discoverSubDirs(projectCwd: string): string[] {
+	const now = Date.now();
+	const cached = subDirCache.get(projectCwd);
+	if (cached && now - cached.at < SUBDIR_CACHE_TTL_MS) return cached.dirs;
+
+	const dirs: string[] = [];
+	const depth1 = readChildDirs(projectCwd);
+	for (const d1 of depth1) {
+		if (dirs.length >= MAX_SCAN_DIRS) break;
+		dirs.push(d1);
+	}
+	for (const d1 of depth1) {
+		if (dirs.length >= MAX_SCAN_DIRS) break;
+		for (const d2 of readChildDirs(d1)) {
+			if (dirs.length >= MAX_SCAN_DIRS) break;
+			dirs.push(d2);
+		}
+	}
+
+	if (subDirCache.size > 64) subDirCache.clear();
+	subDirCache.set(projectCwd, { dirs, at: now });
+	return dirs;
+}
+
+/**
+ * Resolve an asserted artifact path against `projectCwd`, falling back to a bounded
+ * depth-1/depth-2 sub-repo scan when `projectCwd` is a parent directory hosting nested repos.
+ */
+export function resolveArtifactPath(projectCwd: string, relPath: string): string {
+	if (isAbsolute(relPath)) return relPath;
+	const direct = resolve(projectCwd, relPath);
+	if (existsSync(direct)) return direct;
+	for (const subDir of discoverSubDirs(projectCwd)) {
+		const candidate = resolve(subDir, relPath);
+		if (existsSync(candidate)) return candidate;
+	}
+	return direct;
+}
 
 /** Topic filename → the assertions that no longer hold. Absent = healthy/exempt. */
 export type AnergyReport = Map<string, string[]>;
@@ -70,7 +125,7 @@ export function checkAnergy(topics: Topic[], projectCwd: string, activeObservati
 			const hash = assertion.lastIndexOf("#");
 			const relPath = hash > 0 ? assertion.slice(0, hash) : assertion;
 			const symbol = hash > 0 && assertion.length > hash + 1 ? assertion.slice(hash + 1) : undefined;
-			const absPath = isAbsolute(relPath) ? relPath : resolve(projectCwd, relPath);
+			const absPath = resolveArtifactPath(projectCwd, relPath);
 
 			if (!assertionHolds(absPath, symbol) && !mentionedInBuffer(activeObservations, relPath)) {
 				failed.push(assertion);

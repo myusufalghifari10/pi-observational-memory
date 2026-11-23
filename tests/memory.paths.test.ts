@@ -96,9 +96,11 @@ describe("parseFrontMatter", () => {
 });
 
 describe("listTopics", () => {
-	it("returns parsed topics excluding INDEX.md and JOURNEY.md, sorted by filename", () => {
+	it("returns parsed topics excluding INDEX.md, JOURNEY.md, STATE.md, and DEATHS.md, sorted by filename", () => {
 		writeTopic("INDEX.md", "# Memory index");
 		writeTopic("JOURNEY.md", "## 2026-05-01\nStarted the project.");
+		writeTopic("STATE.md", "## Goal\nShip it.");
+		writeTopic("DEATHS.md", "- rejected: old idea because slow");
 		writeTopic("zebra.md", "---\nid: zebra\ntitle: Zebra\nsummary: z\n---\nbody");
 		writeTopic("auth.md", "---\nid: auth\ntitle: Auth\nsummary: a\n---\nbody");
 		const topics = listTopics(root);

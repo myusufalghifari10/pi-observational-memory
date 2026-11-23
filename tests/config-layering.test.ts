@@ -118,4 +118,15 @@ describe("P3.4 frequency flip — explicit user config still wins (L12)", () => 
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("supports renderBudgetTokens and relevantTopK defaults and layered overrides", () => {
+		expect(DEFAULTS.renderBudgetTokens).toBe(18_000);
+		expect(DEFAULTS.relevantTopK).toBe(5);
+		const merged = mergeSettingsConfig(
+			{ renderBudgetTokens: 30_000, relevantTopK: 10 },
+			{ relevantTopK: 8 },
+		);
+		expect(merged.renderBudgetTokens).toBe(30_000);
+		expect(merged.relevantTopK).toBe(8);
+	});
 });

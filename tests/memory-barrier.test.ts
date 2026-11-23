@@ -14,8 +14,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { formatBarrierLine } from "../src/commands/status.js";
 import { evaluateConsolidatorTrigger } from "../src/hooks/consolidator-trigger.js";
-import { evaluateObserverTriggers, isCurrentSession } from "../src/hooks/observer-trigger.js";
+import { effectiveWatermarkId, evaluateObserverTriggers, isCurrentSession } from "../src/hooks/observer-trigger.js";
+import { OM_OBSERVATIONS_GAP } from "../src/ledger/index.js";
 import { Runtime } from "../src/runtime.js";
+import { rawMessage } from "./fixtures/session.js";
 
 function makeRuntime(): Runtime {
 	const runtime = new Runtime();
@@ -52,6 +54,39 @@ describe("S2 anti-starvation: no observer may start inside a barrier", () => {
 		runtime.compactionBarrier = false;
 		evaluateObserverTriggers({} as any, runtime, ctx);
 		expect(ctx.sessionManager.getBranch).toHaveBeenCalled();
+	});
+
+	it("allowDuringBarrier permits barrier pre-tail drain while respecting stopAtTailTokens", () => {
+		const runtime = makeRuntime();
+		runtime.compactionBarrier = true;
+		runtime.config.chunkTokens = 10;
+		// 20 tokens total (two 40-char messages); stopAtTailTokens = 20 => nothing dispatched.
+		const branch = [rawMessage("e1", "a".repeat(40)), rawMessage("e2", "b".repeat(40))];
+		const ctx = {
+			hasUI: false,
+			sessionManager: { getBranch: vi.fn(() => branch), getEntries: vi.fn(() => branch) },
+			getContextUsage: () => ({ tokens: null }),
+		} as any;
+		evaluateObserverTriggers({} as any, runtime, ctx, { allowDuringBarrier: true, stopAtTailTokens: 20 });
+		expect(ctx.sessionManager.getBranch).toHaveBeenCalled();
+		expect(runtime.observersInFlight.size).toBe(0);
+	});
+
+	it("effectiveWatermarkId advances over om.observations.gap entries", () => {
+		const runtime = makeRuntime();
+		const branch = [
+			rawMessage("e1", "first"),
+			{
+				type: "custom",
+				id: "gap-1",
+				parentId: null,
+				timestamp: "2026-05-02T10:01:00.000Z",
+				customType: OM_OBSERVATIONS_GAP,
+				data: { coversUpToId: "e1", attempts: 2, lastError: "failed" },
+			} as any,
+			rawMessage("e2", "second"),
+		];
+		expect(effectiveWatermarkId(runtime, branch)).toBe("e1");
 	});
 });
 

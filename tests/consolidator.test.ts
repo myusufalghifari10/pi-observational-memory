@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { registerConsolidatorTools } from "../agent/consolidator/tools.js";
 import { CONSOLIDATOR_SYSTEM } from "../agent/consolidator/prompt.js";
+import { buildConsolidatorPrompt } from "../src/hooks/consolidator-trigger.js";
 import { buildWorkerEnv } from "../src/spawn/launch.js";
 
 describe("P1.4 consolidator duties (prompt)", () => {
@@ -34,6 +35,37 @@ describe("P1.4 consolidator duties (prompt)", () => {
 		expect(CONSOLIDATOR_SYSTEM).toContain('starts with "rejected:"');
 		// JOURNEY rules must stay untouched (plan: JOURNEY rules unchanged).
 		expect(CONSOLIDATOR_SYSTEM).toContain("STRICTLY DESCRIPTIVE");
+	});
+
+	it("documents strats/ authoring with cue/summary/command front-matter and ~2000 token STATE.md target", () => {
+		expect(CONSOLIDATOR_SYSTEM).toContain("strats/");
+		expect(CONSOLIDATOR_SYSTEM).toContain("cue:");
+		expect(CONSOLIDATOR_SYSTEM).toContain("summary:");
+		expect(CONSOLIDATOR_SYSTEM).toContain("command:");
+		expect(CONSOLIDATOR_SYSTEM).toContain("target ~2000 tokens");
+	});
+
+	it("buildConsolidatorPrompt includes existing strats when present", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "om-cons-prompt-"));
+		try {
+			const memoryRoot = join(dir, ".memory", "sess-1");
+			const tools = new Map<string, any>();
+			registerConsolidatorTools({ registerTool: (def: any) => tools.set(def.name, def) } as never, memoryRoot);
+			await tools.get("write").execute("1", {
+				path: "strats/deploy.md",
+				content: "---\nid: deploy\ntitle: Deploy\ncue: ship it\nsummary: release checklist\ncommand: ./deploy.sh\n---\nSteps.\n",
+			});
+			const prompt = buildConsolidatorPrompt(
+				memoryRoot,
+				[{ timestamp: "2026-09-25T10:00:00", content: "strat: deploy -> ship it", tokenCount: 8, kind: "strat" }],
+				3500,
+			);
+			expect(prompt).toContain("CURRENT STRATS");
+			expect(prompt).toContain("ship it — release checklist");
+			expect(prompt).toContain("deploy.md");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

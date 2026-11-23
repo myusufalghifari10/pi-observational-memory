@@ -81,4 +81,20 @@ describe("assignObservationTimestamps (L5)", () => {
 		const [obs] = assignObservationTimestamps([{ timestamp: "2026-06-25 14:30", content: "x" }]);
 		expect(obs.sourceEntryId).toBeUndefined();
 	});
+
+	it("uses explicit model sourceEntryId and user-prefix disambiguation when slice is provided", () => {
+		const slice = [
+			rawMessage("u-1000", "User prefers bun", { timestamp: "2026-05-02T10:00:10" }),
+			toolResultMessage("tr-1000", "tool output", { timestamp: "2026-05-02T10:00:45" }),
+		];
+		const result = assignObservationTimestamps(
+			[
+				{ timestamp: "2026-05-02 10:00", content: "Tool output noted", sourceEntryId: "tr-1000" },
+				{ timestamp: "2026-05-02 10:00", content: "User prefers bun over npm", kind: "preference" },
+			],
+			{ slice },
+		);
+		expect(result[0].sourceEntryId).toBe("tr-1000");
+		expect(result[1].sourceEntryId).toBe("u-1000");
+	});
 });

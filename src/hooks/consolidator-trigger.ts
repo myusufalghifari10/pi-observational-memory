@@ -20,10 +20,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { logIfEnabled } from "../debug-log.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
+	OM_OBSERVATIONS_RECORDED,
+	entryIndexForId,
 	foldLedger,
 	lastSourceEntryId,
+	latestCoverageMarkerId,
 	observationToLine,
 	poolTokens,
+	renderStratLines,
 	selectPromotionOverflow,
 	sortObservations,
 	type Entry,
@@ -31,7 +35,7 @@ import {
 } from "../ledger/index.js";
 import { nowTimestamp } from "../ledger/serialize.js";
 import { renderIndexFile } from "../memory/index-render.js";
-import { atomicWrite, indexPath, listTopics, readJourney } from "../memory/paths.js";
+import { atomicWrite, indexPath, listStrats, listTopics, readJourney } from "../memory/paths.js";
 import type { Runtime } from "../runtime.js";
 import { buildWorkerArgv, buildWorkerEnv, spawnWorker } from "../spawn/launch.js";
 import {
@@ -64,8 +68,13 @@ function nextRunId(): string {
  * overflow lines. The journey is included verbatim so the consolidator updates it in place
  * (append a segment for this batch; compress the old tail only if over `journeyTargetTokens`).
  */
-function buildConsolidatorPrompt(memoryRoot: string, promote: Observation[], journeyTargetTokens: number): string {
+export function buildConsolidatorPrompt(memoryRoot: string, promote: Observation[], journeyTargetTokens: number): string {
 	const indexText = renderIndexFile(listTopics(memoryRoot));
+	const strats = listStrats(memoryRoot);
+	const stratsBlock =
+		strats.length > 0
+			? `===== CURRENT STRATS (.memory/strats/ — existing procedural workflows) =====\n${renderStratLines(strats).join("\n")}\n===== END STRATS =====\n\n`
+			: "";
 	const journeyText = readJourney(memoryRoot);
 	const journeyWords = Math.round((journeyTargetTokens * 3) / 4);
 	const obsLines = sortObservations(promote).map(observationToLine).join("\n");
@@ -76,6 +85,7 @@ function buildConsolidatorPrompt(memoryRoot: string, promote: Observation[], jou
 		"===== CURRENT MEMORY INDEX (generated; do not edit INDEX.md) =====\n" +
 		`${indexText}\n` +
 		"===== END MEMORY INDEX =====\n\n" +
+		stratsBlock +
 		"===== CURRENT JOURNEY (.memory/JOURNEY.md — the running descriptive project history) =====\n" +
 		`${journeyText ?? "(empty — no journey yet; start one)"}\n` +
 		"===== END JOURNEY =====\n\n" +
@@ -189,7 +199,19 @@ async function dispatchConsolidator(
 		}
 
 		if (toDrop.length > 0) {
-			const coversUpToId = lastSourceEntryId(branch);
+			const dropSet = new Set(toDrop);
+			let bestIdx = -1;
+			let bestSourceId: string | undefined;
+			for (const obs of promote) {
+				if (!dropSet.has(obs.timestamp) || !obs.sourceEntryId) continue;
+				const idx = entryIndexForId(branch, obs.sourceEntryId);
+				if (idx > bestIdx) {
+					bestIdx = idx;
+					bestSourceId = obs.sourceEntryId;
+				}
+			}
+			const coversUpToId =
+				bestSourceId ?? latestCoverageMarkerId(branch, OM_OBSERVATIONS_RECORDED) ?? lastSourceEntryId(branch);
 			if (coversUpToId) {
 				// P0.11 (review Note A): stale-safe like every observer commit — a stale throw
 				// here must mark ctxStale and skip the bookkeeping, not burn circuit-breaker state.

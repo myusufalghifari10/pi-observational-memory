@@ -11,6 +11,7 @@ export type ModelObservation = {
 	timestamp: string; // "YYYY-MM-DD HH:MM"
 	content: string;
 	kind?: string;
+	sourceEntryId?: string;
 };
 
 const MODEL_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/;
@@ -92,7 +93,10 @@ export function assignObservationTimestamps(
 		const kind: ObservationKind = isObservationKind(model.kind) ? model.kind : "event";
 		const observation: Observation = { timestamp, content, tokenCount: estimateStringTokens(content), kind };
 		if (options.slice && options.slice.length > 0) {
-			const { sourceEntryId } = deriveProvenance(options.slice, timestamp);
+			const { sourceEntryId } = deriveProvenance(options.slice, timestamp, {
+				sourceEntryId: model.sourceEntryId,
+				content,
+			});
 			if (sourceEntryId) observation.sourceEntryId = sourceEntryId;
 		}
 		result.push(observation);

@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
 	OM_OBSERVATIONS_DROPPED,
+	OM_OBSERVATIONS_GAP,
 	OM_OBSERVATIONS_RECORDED,
 	earlierCoverageMarkerId,
 	entryIndexById,
 	isSourceEntry,
 	lastSourceEntryId,
+	latestAckedCoverageIndex,
+	latestAckedCoverageMarkerId,
 	latestCoverageIndex,
 	latestCoverageMarkerId,
 	rawTokensAfterIndex,
@@ -116,6 +119,40 @@ describe("ledger progress helpers", () => {
 			textCustomMessage("raw-2", "bbbbbbbb"),
 		];
 		expect(rawTokensSinceLastCompaction(entries)).toBe(3); // raw-1 + raw-2 from kept tail
+	});
+
+	it("gap-aware watermark: om.observations.gap advances latestAckedCoverageMarkerId and resets rawTokensSinceObservationCoverage", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-1", { observations: [observation("t1")], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			{
+				type: "custom",
+				id: "gap-1",
+				parentId: null,
+				timestamp: "2026-05-02T10:05:00.000Z",
+				customType: OM_OBSERVATIONS_GAP,
+				data: { afterEntryId: "raw-1", coversUpToId: "raw-2", attempts: 2, lastError: "boom" },
+			} as never,
+			textCustomMessage("raw-3", "cccccccccccc"),
+		];
+
+		expect(latestAckedCoverageIndex(entries)).toBe(2);
+		expect(latestAckedCoverageMarkerId(entries)).toBe("raw-2");
+		expect(rawTokensSinceObservationCoverage(entries)).toBe(3); // only raw-3 after gap
+	});
+
+	it("post-compaction baseline: anchors at source entry before firstKeptEntryId when no observations or gaps exist", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			compactionEntry("cmp-1", { firstKeptEntryId: "raw-2" }),
+			textCustomMessage("raw-3", "cccccccccccc"),
+		];
+
+		expect(latestAckedCoverageIndex(entries)).toBe(0); // raw-1 (just before raw-2)
+		expect(latestAckedCoverageMarkerId(entries)).toBe("raw-1");
+		expect(rawTokensSinceObservationCoverage(entries)).toBe(5); // raw-2 (2) + raw-3 (3), never raw-1
 	});
 });
 
@@ -232,6 +269,42 @@ describe("deriveProvenance (L1)", () => {
 		expect(deriveProvenance([], "2026-05-02T10:00:00")).toEqual({
 			sourceEntryId: "",
 			provenance: "model-distilled",
+		});
+	});
+
+	it("resolves an explicit sourceEntryId hint when it exists in the slice", () => {
+		expect(
+			deriveProvenance(slice, "2026-05-02T10:10:00", {
+				sourceEntryId: "u-1000",
+				content: "User stated something",
+			}),
+		).toEqual({
+			sourceEntryId: "u-1000",
+			provenance: "user-asserted",
+		});
+	});
+
+	it("prefers a same-minute user entry over a later same-minute tool result for User-prefixed observations", () => {
+		const sameMinuteSlice = [
+			rawMessage("u-1007", "we prefer pnpm", { timestamp: "2026-05-02T10:07:10" }),
+			toolResultMessage("tr-1007", "tool stdout", { timestamp: "2026-05-02T10:07:45" }),
+		];
+		expect(
+			deriveProvenance(sameMinuteSlice, "2026-05-02T10:07:00", {
+				content: "User prefers pnpm over npm",
+			}),
+		).toEqual({
+			sourceEntryId: "u-1007",
+			provenance: "user-asserted",
+		});
+		// Non-User observation in the same minute still binds to the last entry (toolResult).
+		expect(
+			deriveProvenance(sameMinuteSlice, "2026-05-02T10:07:00", {
+				content: "Build command exited cleanly",
+			}),
+		).toEqual({
+			sourceEntryId: "tr-1007",
+			provenance: "tool-derived",
 		});
 	});
 });

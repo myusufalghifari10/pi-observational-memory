@@ -28,6 +28,10 @@ export interface Config {
 	 * this, the consolidator compresses its oldest entries (recent history stays detailed).
 	 */
 	journeyTargetTokens: number;
+	/** [5]+[6] shared render token budget passed to renderSummaryV2. */
+	renderBudgetTokens: number;
+	/** [5] max rendered RELEVANT MEMORY lines passed to renderSummaryV2. */
+	relevantTopK: number;
 	/** Max simultaneous in-flight observer subprocesses. */
 	observerConcurrency: number;
 	/**
@@ -62,6 +66,8 @@ export const DEFAULTS: Config = {
 	compactAtContextTokens: 64_000,
 	tailTokens: 20_000,
 	journeyTargetTokens: 1_000,
+	renderBudgetTokens: 18_000,
+	relevantTopK: 5,
 	observerConcurrency: 4,
 	serialWorkers: true,
 	resumeAfterMidRunCompaction: true,
@@ -114,6 +120,8 @@ export function normalizeSettingsConfig(value: Record<string, unknown>, base: Co
 		"compactAtContextTokens",
 		"tailTokens",
 		"journeyTargetTokens",
+		"renderBudgetTokens",
+		"relevantTopK",
 		"observerConcurrency",
 	] as const;
 	for (const key of numberKeys) {

@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,7 +11,7 @@ import {
 	type Observation,
 	type ScoredLine,
 } from "../src/ledger/index.js";
-import { buildRelevantCandidates, lastUserQuery, QUERY_MAX_CHARS } from "../src/hooks/compaction-hook.js";
+import { buildCompactionQuery, buildRelevantCandidates, lastUserQuery, QUERY_MAX_CHARS } from "../src/hooks/compaction-hook.js";
 import { estimateStringTokens } from "../src/tokens.js";
 import {
 	observation,
@@ -431,6 +434,91 @@ describe("P2.5 hook capture — lastUserQuery + buildRelevantCandidates", () => 
 		for (const entry of candidates) {
 			expect(entry.meta.tokenCount).toBe(estimateStringTokens(entry.text));
 		}
+	});
+
+	it("extracts section/paragraph excerpts from non-anergic topic files when memoryRoot is passed and skips STATE lines", () => {
+		const dir = mkdtempSync(join(tmpdir(), "om-rel-body-"));
+		try {
+			const memoryRoot = join(dir, ".memory", "sess-1");
+			mkdirSync(memoryRoot, { recursive: true });
+			writeFileSync(
+				join(memoryRoot, "auth.md"),
+				[
+					"---",
+					"id: auth",
+					"title: Auth",
+					"summary: auth overview",
+					"---",
+					"## JWT Validation",
+					"Uses RS256 public keys from JWKS endpoint.",
+					"",
+					"## Refresh Flow",
+					"Rotates refresh tokens on every use.",
+				].join("\n"),
+			);
+			writeFileSync(
+				join(memoryRoot, "stale.md"),
+				"---\nid: stale\nsummary: stale summary\n---\nOld details.\n",
+			);
+			const state = { body: "## Goal\nShip auth\n## Open loops\n- verify JWKS" };
+			const topics = [
+				{ path: ".memory/sess-1/auth.md", filename: "auth.md", summary: "auth overview" },
+				{ path: ".memory/sess-1/stale.md", filename: "stale.md", summary: "stale summary" },
+			];
+			const anergy = new Map([["stale.md", ["src/missing.ts"]]]);
+
+			const candidates = buildRelevantCandidates(state, topics, memoryRoot, anergy);
+			expect(candidates.some((c) => c.id.startsWith("state:"))).toBe(false);
+			expect(candidates.some((c) => c.id.includes("stale.md"))).toBe(false);
+			expect(candidates.map((c) => c.id)).toEqual([
+				"topic:.memory/sess-1/auth.md",
+				"topic-body:.memory/sess-1/auth.md#0",
+				"topic-body:.memory/sess-1/auth.md#1",
+			]);
+			expect(candidates[1]?.text).toBe("[auth.md#JWT Validation] Uses RS256 public keys from JWKS endpoint.");
+			expect(candidates[2]?.text).toBe("[auth.md#Refresh Flow] Rotates refresh tokens on every use.");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("buildCompactionQuery combines up to 3 recent user/custom messages with STATE Next and Open loops", () => {
+		const branch: TestEntry[] = [
+			rawMessage("u1", "oldest ignored message"),
+			rawMessage("u2", "first recent message"),
+			textCustomMessage("om1", "hidden om bridge", { customType: "om.resume" }),
+			textCustomMessage("c1", "second recent message"),
+			rawMessage("u3", "third recent message"),
+		];
+		const state = {
+			body: "## Goal\nMain goal\n## Next\n- run tests\n## Open loops\n- fix bug\n## Done\n- done item",
+		};
+		const query = buildCompactionQuery(branch, state)!;
+		expect(query).not.toContain("oldest ignored message");
+		expect(query).not.toContain("hidden om bridge");
+		expect(query).toContain("first recent message");
+		expect(query).toContain("second recent message");
+		expect(query).toContain("third recent message");
+		expect(query).toContain("- run tests");
+		expect(query).toContain("- fix bug");
+		expect(query.length).toBeLessThanOrEqual(QUERY_MAX_CHARS);
+	});
+
+	it("buildCompactionQuery keeps newest user prompt and STATE Next/Open loops when an older message is 3000 chars", () => {
+		const hugeOlder = "legacy log line ".repeat(200).slice(0, 3_000);
+		const branch: TestEntry[] = [
+			rawMessage("u1", hugeOlder),
+			rawMessage("u2", "middle prompt"),
+			rawMessage("u3", "newest user prompt about auth tokens"),
+		];
+		const state = {
+			body: "## Goal\nMain goal\n## Next\n- verify auth token rotation\n## Open loops\n- audit refresh window",
+		};
+		const query = buildCompactionQuery(branch, state)!;
+		expect(query).toContain("newest user prompt about auth tokens");
+		expect(query).toContain("- verify auth token rotation");
+		expect(query).toContain("- audit refresh window");
+		expect(query.length).toBeLessThanOrEqual(QUERY_MAX_CHARS);
 	});
 });
 

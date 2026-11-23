@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCompactionProjection, visibleProjection } from "../src/ledger/index.js";
+import { buildCompactionProjection, fullProjection, visibleProjection } from "../src/ledger/index.js";
 import {
 	compactionEntry,
 	memoryDetails,
@@ -59,6 +59,30 @@ describe("buildCompactionProjection", () => {
 
 		const projection = buildCompactionProjection(entries, "raw-2");
 		expect(projection.observations.map((o) => o.timestamp)).toEqual(["2026-05-02T10:00:02"]);
+	});
+
+	it("drops observations tombstoned by an om.observations.dropped entry whose coversUpToId is inside the verbatim tail", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-1", {
+				observations: [observation("2026-05-02T10:00:01"), observation("2026-05-02T10:00:02")],
+				coversUpToId: "raw-1",
+			}),
+			textCustomMessage("raw-2", "bbbb"), // verbatim tail starts here
+			textCustomMessage("raw-3", "cccc"), // branch tip inside verbatim tail
+			observationsDroppedEntry("om-drop-tip", {
+				observationTimestamps: ["2026-05-02T10:00:01"],
+				coversUpToId: "raw-3",
+			}),
+		];
+
+		const projection = buildCompactionProjection(entries, "raw-2");
+		expect(projection.observations.map((o) => o.timestamp)).toEqual(["2026-05-02T10:00:02"]);
+		// Tree navigation at an earlier entry before the drop entry still retains the observation.
+		expect(fullProjection(entries, "raw-2").observations.map((o) => o.timestamp)).toEqual([
+			"2026-05-02T10:00:01",
+			"2026-05-02T10:00:02",
+		]);
 	});
 });
 

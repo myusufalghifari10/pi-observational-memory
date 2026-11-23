@@ -213,4 +213,21 @@ describe("P4.1 death stubs in section [4] (revocable, never permanent)", () => {
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
+
+	it("resolves verify paths inside nested sub-repository directories without false possibly-revived", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "om-deaths-subrepo-"));
+		try {
+			const subSrc = join(cwd, "Github Repository", "my-app", "src");
+			mkdirSync(subSrc, { recursive: true });
+			writeFileSync(join(subSrc, "server.py"), "def legacy_handler():\n    pass\n");
+			const deaths = {
+				entries: parseDeaths("- rejected: legacy handler because blocking IO (verify: src/server.py#legacy_handler)"),
+				projectCwd: cwd,
+			};
+			const line = renderMemoryMap([], undefined, deaths)!.split("\n").at(-1);
+			expect(line).toBe("- rejected: legacy handler — because blocking IO");
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
 });

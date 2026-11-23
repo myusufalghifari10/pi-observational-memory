@@ -72,32 +72,51 @@ function provenanceOf(entry: Entry): ProvenanceClass {
 	return "model-distilled"; // branch_summary (model-generated) and anything else
 }
 
+const USER_PREFIX_RE =
+	/^User\s+(?:stated|said|asked|prefers|chose|instructed|reported|wants|approved|replied)\b/i;
+
 /**
  * L1 — provenance is derived at the extension boundary, never labeled by an LLM.
  *
- * The bounding source entry is the LAST source entry of the slice whose minute is at or
- * before the observation's minute-resolution base time; when the observation is after every
- * entry (chunk fallback anchor) the slice's last source entry bounds it. Minute bucketing (not
- * second) matters: the observer copies source minutes verbatim ("[User @ … 14:30]"), so the
- * true source entry usually carries seconds INSIDE the observation's minute and must still win.
+ * When `hint?.sourceEntryId` resolves to a source entry in `slice`, that exact entry wins.
+ * Otherwise the bounding source entry is the LAST source entry of the slice whose minute is
+ * at or before the observation's minute-resolution base time (preferring a user entry in the
+ * same minute when the observation opens with a User-asserted prefix); when the observation
+ * is after every entry (chunk fallback anchor) the slice's last source entry bounds it.
  *
  * Deterministic, pure, no I/O — safe on the render and commit paths alike.
  */
 export function deriveProvenance(
 	slice: Entry[],
 	obsTimestamp: string,
+	hint?: { sourceEntryId?: string; content?: string },
 ): { sourceEntryId: string; provenance: ProvenanceClass } {
 	const sourceEntries = slice.filter(isSourceEntry);
+	if (hint?.sourceEntryId) {
+		const matched = sourceEntries.find((entry) => entry.id === hint.sourceEntryId);
+		if (matched) return { sourceEntryId: matched.id, provenance: provenanceOf(matched) };
+	}
+
 	const last = sourceEntries[sourceEntries.length - 1];
 	const obsMinute = localMinuteKey(obsTimestamp);
 
 	let bounding: Entry | undefined;
+	let lastSameMinuteUser: Entry | undefined;
+	let lastPriorUser: Entry | undefined;
 	if (obsMinute !== undefined) {
 		for (const entry of sourceEntries) {
 			const entryMinute = localMinuteKey(entry.timestamp);
 			if (entryMinute === undefined || entryMinute > obsMinute) continue;
 			bounding = entry;
+			if (provenanceOf(entry) === "user-asserted") {
+				lastPriorUser = entry;
+				if (entryMinute === obsMinute) lastSameMinuteUser = entry;
+			}
 		}
+	}
+	if (hint?.content && USER_PREFIX_RE.test(hint.content)) {
+		if (lastSameMinuteUser) bounding = lastSameMinuteUser;
+		else if (bounding && provenanceOf(bounding) === "tool-derived" && lastPriorUser) bounding = lastPriorUser;
 	}
 	bounding = bounding ?? last ?? slice[slice.length - 1];
 	if (!bounding) return { sourceEntryId: "", provenance: "model-distilled" };
@@ -180,6 +199,56 @@ export function earlierCoverageMarkerId(
 	return firstIndex <= secondIndex ? firstId : secondId;
 }
 
+function latestAckedCoverage(entries: Entry[]): { index: number; id: string | undefined } {
+	const idToIndex = entryIndexById(entries);
+	let latestIndex = -1;
+	let latestMarkerId: string | undefined;
+
+	for (const entry of entries) {
+		let coversUpToId: string | undefined;
+		if (isValidCoverageEntry(entry, OM_OBSERVATIONS_RECORDED)) {
+			coversUpToId = entry.data.coversUpToId;
+		} else if (isGapEntry(entry)) {
+			coversUpToId = entry.data.coversUpToId;
+		}
+		if (coversUpToId === undefined) continue;
+		const coveredIndex = idToIndex.get(coversUpToId);
+		if (coveredIndex === undefined) continue;
+		if (coveredIndex > latestIndex) {
+			latestIndex = coveredIndex;
+			latestMarkerId = coversUpToId;
+		}
+	}
+
+	if (latestIndex >= 0) return { index: latestIndex, id: latestMarkerId };
+
+	// When no observation/gap entry exists on the branch, anchor baseline coverage before
+	// the last compaction's firstKeptEntryId so enabling /om on after a native compaction
+	// never re-observes pre-compaction history.
+	const compactionIndex = findLastCompactionIndex(entries);
+	if (compactionIndex >= 0) {
+		const fkId = entries[compactionIndex].firstKeptEntryId;
+		const fkIdx = fkId ? idToIndex.get(fkId) : undefined;
+		if (fkIdx !== undefined && fkIdx > 0) {
+			for (let i = fkIdx - 1; i >= 0; i--) {
+				if (isSourceEntry(entries[i])) {
+					return { index: i, id: entries[i].id };
+				}
+			}
+		}
+	}
+
+	return { index: -1, id: undefined };
+}
+
+export function latestAckedCoverageIndex(entries: Entry[]): number {
+	return latestAckedCoverage(entries).index;
+}
+
+export function latestAckedCoverageMarkerId(entries: Entry[]): string | undefined {
+	return latestAckedCoverage(entries).id;
+}
+
 export function rawTokensAfterIndex(entries: Entry[], index: number): number {
 	let total = 0;
 	for (let i = Math.max(0, index + 1); i < entries.length; i++) {
@@ -193,7 +262,7 @@ export function rawTokensSinceCoverage(entries: Entry[], customType: MemoryCusto
 }
 
 export function rawTokensSinceObservationCoverage(entries: Entry[]): number {
-	return rawTokensSinceCoverage(entries, OM_OBSERVATIONS_RECORDED);
+	return rawTokensAfterIndex(entries, latestAckedCoverageIndex(entries));
 }
 
 export function rawTokensSinceDropCoverage(entries: Entry[]): number {

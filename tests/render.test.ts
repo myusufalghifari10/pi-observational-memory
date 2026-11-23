@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
 	extractOpenLoops,
+	MAX_BELIEF_CHAIN,
 	observationToLine,
 	RENDER_BUDGET_TOKENS,
 	renderSummary,
@@ -424,6 +425,73 @@ describe("renderSummaryV2 (P2.3 — knapsack, L6 fallback, PackExplain)", () => 
 			`${loser.timestamp}  believed: prefers SWR`,
 			`${winner.timestamp}  now: switched to React Query`,
 		]);
+	});
+
+	it("renders admitted Section [6] units in chronological order while packExplain stays score-ordered", () => {
+		const earlierLowerScore = observation(at(1), {
+			content: "earlier completion",
+			tokenCount: 10,
+			kind: "completion",
+			sourceEntryId: "e1",
+		});
+		const laterHigherScore = observation(at(2), {
+			content: "later user assertion",
+			tokenCount: 10,
+			kind: "assertion",
+			sourceEntryId: "e2",
+		});
+		const observationMeta = new Map<string, LineMeta>([
+			[earlierLowerScore.timestamp, meta({ kind: "completion", provenance: "model-distilled" })], // 0.09
+			[laterHigherScore.timestamp, meta({ kind: "assertion", provenance: "user-asserted" })], // 0.12
+		]);
+		const { summary, packExplain } = renderSummaryV2({
+			observations: [laterHigherScore, earlierLowerScore],
+			observationMeta,
+			budget: 100,
+		});
+		expect(packExplain.lines.map((l) => l.id)).toEqual([laterHigherScore.timestamp, earlierLowerScore.timestamp]);
+		const lines = summary.split("## Observations\n")[1].split("\n");
+		expect(lines).toEqual([
+			`${earlierLowerScore.timestamp}  earlier completion`,
+			`${laterHigherScore.timestamp}  later user assertion`,
+		]);
+	});
+
+	it("caps belief unit chain length at MAX_BELIEF_CHAIN (4), degrading older members to singletons", () => {
+		expect(MAX_BELIEF_CHAIN).toBe(4);
+		const obs = [1, 2, 3, 4, 5].map((n) => observation(at(n), { content: `fact ${n}` }));
+		const supersessions = new Map([
+			[obs[0].timestamp, obs[1].timestamp],
+			[obs[1].timestamp, obs[2].timestamp],
+			[obs[2].timestamp, obs[3].timestamp],
+			[obs[3].timestamp, obs[4].timestamp],
+		]);
+		const { summary } = renderSummaryV2({ observations: obs, supersessions });
+		const lines = summary.split("## Observations\n")[1].split("\n");
+		expect(lines).toEqual([
+			`${obs[0].timestamp}  fact 1`,
+			`${obs[1].timestamp}  believed: fact 2`,
+			`${obs[2].timestamp}  believed: fact 3`,
+			`${obs[3].timestamp}  believed: fact 4`,
+			`${obs[4].timestamp}  now: fact 5`,
+		]);
+	});
+
+	it("honors custom topK for Section [5] Relevant memory", () => {
+		const candidates = ["a", "b", "c", "d", "e", "f", "g"].map((ch) => ({
+			id: `topic:${ch}.md`,
+			text: `topic ${ch} zebra`,
+			meta: meta({ kind: "event", tokenCount: 4 }),
+		}));
+		const { summary } = renderSummaryV2({
+			state: { body: "## Goal\nZebra" },
+			observations: [],
+			query: "zebra",
+			candidates,
+			topK: 7,
+		});
+		const relevant = summary.split("## Relevant memory\n")[1]?.split("\n\n## ")[0] ?? "";
+		expect(relevant.split("\n")).toHaveLength(7);
 	});
 });
 

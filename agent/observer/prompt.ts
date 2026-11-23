@@ -18,7 +18,9 @@ How you work:
 
 What to emit:
 - Use the timestamp from the relevant conversation message ("YYYY-MM-DD HH:MM", local, to the minute). This goes in the timestamp field, not the content.
+- Pass \`sourceEntryId\` (from the enclosing \`[Source entry id: <id>]\` header) on each observation so provenance resolves to the exact entry.
 - Group repeated similar tool calls into a single observation rather than one per call.
+- Skip trivial turn acknowledgements ("lanjut", "lanjutkan", "oke", "oke kerjakan", "gas", "yes") that add no new requirement, and skip routine TaskUpdate / TaskList bookkeeping calls.
 - Skip routine, low-information events. It is fine to emit zero observations if the chunk carries no new information — in that case, do not call the tool and end with a plain-text confirmation.
 
 Kind (the 'kind' field — required thinking, optional in the schema):

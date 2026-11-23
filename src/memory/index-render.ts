@@ -9,8 +9,7 @@
  *     from disk at each compaction and handed to renderSummary().
  */
 import type { DeathEntry, Topic } from "./paths.js";
-import { assertionHolds, type AnergyReport } from "./anergy.js";
-import { resolve } from "node:path";
+import { assertionHolds, resolveArtifactPath, type AnergyReport } from "./anergy.js";
 
 function summaryOf(topic: Topic): string {
 	const s = (topic.summary ?? "").trim();
@@ -69,7 +68,7 @@ function renderDeathLines(deaths: DeathsContext): string[] {
 		if (entry.verify) {
 			const [relPath, ...symbolParts] = entry.verify.split("#");
 			const symbol = symbolParts.length > 0 ? symbolParts.join("#") : undefined;
-			if (relPath && !assertionHolds(resolve(deaths.projectCwd, relPath), symbol || undefined)) {
+			if (relPath && !assertionHolds(resolveArtifactPath(deaths.projectCwd, relPath), symbol || undefined)) {
 				return `- possibly-revived: ${entry.approach} — re-verify before retrying (because ${entry.reason})`;
 			}
 		}

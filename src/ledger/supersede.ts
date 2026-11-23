@@ -31,7 +31,23 @@ const STOP_WORDS = new Set([
 	// Observation-prose glue: nearly every observation opens with "User …" / "The project …",
 	// so these carry no discriminative signal for overlap (plan §2.2 — stop-word list).
 	"user", "users", "same", "via", "does", "done", "every", "where", "those", "while",
+	"assistant", "reported", "launched", "findings", "settled", "concluded", "details",
 ]);
+
+export const SUPERSESSION_CUE_RE =
+	/\b(?:switching from|switched from|switched to|replacing|replaced|replaces|instead of|changed from|changed to|no longer|superseded|supersedes|reverted|corrected|rather than|over)\b/i;
+
+export function hasSupersessionSignal(
+	newerContent: string,
+	newerTokens: Set<string>,
+	olderTokens: Set<string>,
+	shared: number,
+): boolean {
+	if (shared < 2) return false;
+	if (SUPERSESSION_CUE_RE.test(newerContent)) return true;
+	const minSize = Math.min(newerTokens.size, olderTokens.size);
+	return minSize > 0 && shared / minSize >= 0.5;
+}
 
 /**
  * Identifier tokens of a content string (plan §2.2):
@@ -52,7 +68,7 @@ export function identifierTokens(content: string): Set<string> {
 	}
 	// camelCase boundaries need original casing: re-walk the raw content.
 	for (const word of content.split(/[^A-Za-z0-9_]+/)) {
-		for (const m of word.matchAll(/[a-z]+|[A-Z][a-z0-9]*|[A-Z]+(?![a-z])/g)) {
+		for (const m of word.matchAll(/[a-z]+|[A-Z]+(?![a-z])|[A-Z][a-z0-9]*/g)) {
 			const seg = m[0].toLowerCase();
 			if (seg.length >= 3 && !STOP_WORDS.has(seg)) tokens.add(seg);
 		}
@@ -123,12 +139,18 @@ export function detectSupersessions(
 
 		let best: Observation | undefined;
 		let bestShared = 1; // need ≥2
+		let bestRatio = 0;
 		for (const older of eligibleOlder) {
 			if (usedOlder.has(older.timestamp)) continue;
 			if (older.timestamp === newer.timestamp) continue;
-			const shared = sharedIdentifierCount(newerTokens, tokensOf(older));
-			if (shared > bestShared) {
+			const olderTokens = tokensOf(older);
+			const shared = sharedIdentifierCount(newerTokens, olderTokens);
+			if (!hasSupersessionSignal(newer.content, newerTokens, olderTokens, shared)) continue;
+			const minSize = Math.min(newerTokens.size, olderTokens.size);
+			const ratio = minSize > 0 ? shared / minSize : 0;
+			if (shared > bestShared || (shared === bestShared && ratio > bestRatio)) {
 				bestShared = shared;
+				bestRatio = ratio;
 				best = older;
 			}
 		}

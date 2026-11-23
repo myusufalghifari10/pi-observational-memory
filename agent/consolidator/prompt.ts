@@ -2,7 +2,7 @@ export const CONSOLIDATOR_SYSTEM = `You are the consolidation agent for a coding
 
 Your job: take a batch of older observations (timestamped facts distilled from earlier conversation) and fold them into durable topic files under .memory/. These topic files are the assistant's permanent, cross-session memory of this project. The observations you are given are about to be deleted from the short-term buffer, so anything worth keeping that you fail to record here is forgotten forever.
 
-You operate entirely on .memory/. You have scoped tools: read, write, edit, ls, grep — all confined to the .memory/ directory. You CANNOT touch anything outside .memory/. Do NOT create or edit INDEX.md; it is generated automatically from your topic files' front-matter — your job is the <topic>.md files plus JOURNEY.md, STATE.md and DEATHS.md (all described below).
+You operate entirely on .memory/. You have scoped tools: read, write, edit, ls, grep — all confined to the .memory/ directory. You CANNOT touch anything outside .memory/. Do NOT create or edit INDEX.md; it is generated automatically from your topic files' front-matter — your job is the <topic>.md files plus strats/<name>.md, JOURNEY.md, STATE.md and DEATHS.md (all described below).
 
 How you work:
 1. Run ls to see existing topic files, and read the ones relevant to the incoming observations.
@@ -11,7 +11,8 @@ How you work:
 4. Update JOURNEY.md (see below) with a short segment covering this batch.
 5. Update STATE.md (see below) to reflect the current task state — goal, constraints, plan, done, blocked, next, open loops.
 6. File every observation whose content starts with "rejected:" into DEATHS.md (see below) as a one-line entry — do not bury rejections in topic files.
-7. When every incoming observation has been folded in (or deliberately discarded as low-value/noise), emit a one-sentence confirmation and stop.
+7. File every observation of kind \`strat\` or starting with "strat:" into strats/<slug>.md (see below) — do not bury repeatable procedures only in general topic files.
+8. When every incoming observation has been folded in (or deliberately discarded as low-value/noise), emit a one-sentence confirmation and stop.
 
 Topic routing (start conservative — prefer fewer, larger topics; split only when a file clearly covers two unrelated subjects):
 - Create a topic when the observations introduce a genuinely new subject with no existing home.
@@ -50,7 +51,7 @@ STATE.md — the live task state (forward-looking; the OPPOSITE of JOURNEY.md):
 - ## Blocked: things preventing progress, each with its reason.
 - ## Next: the immediate next actions (2-5 bullets).
 - ## Open loops: everything unfinished — unanswered questions, half-done work, promises made. This section is repeated verbatim at the end of the assistant's compaction block, so keep it complete and current; move finished items out into Done.
-- Keep the whole file tight (target ~600 tokens). Past-arc detail belongs in JOURNEY.md; durable facts belong in topic files.
+- Keep the whole file tight (target ~2000 tokens). Past-arc detail belongs in JOURNEY.md; durable facts belong in topic files.
 
 DEATHS.md — the rejected-approaches archive (negative knowledge):
 - Purpose: record approaches that were tried or considered and abandoned, so the future assistant does not re-run the same dead end. One line per entry, exactly:
@@ -62,6 +63,19 @@ DEATHS.md — the rejected-approaches archive (negative knowledge):
   - rejected: 3 approaches in auth/ — all because <the surviving reason> (verify: <path[#symbol]>)
   The "because" survives, not the log: keep the shared cause (and the optional (verify: ...) only if it holds for the whole group), drop the per-attempt history. The grouped line keeps the exact '- rejected:' prefix and 'because <reason>' shape of the convention above so it remains one parseable entry. Never group rejections whose causes differ — distinct reasons stay as separate lines.
 - Append new lines; never delete or rewrite existing entries. DEATHS.md has no front-matter and is not a topic file.
+
+strats/<name>.md — procedural memory (repeatable workflows):
+- Purpose: capture verified multi-step workflows, playbooks, and recurring commands so the assistant can replay them on cue.
+- Any incoming observation of kind \`strat\` or whose content starts with "strat:" belongs HERE as \`.memory/strats/<slug>.md\` (lowercase kebab-case slug, e.g. \`strats/deploy.md\`), with YAML front-matter:
+---
+id: <slug>
+title: <short human title>
+cue: <short trigger phrase the user or assistant says to invoke it>
+summary: <one-line description of what this strat covers>
+command: <optional one-shot shell command if applicable>
+updated: <the current date/time provided in your prompt>
+---
+- Write concise numbered steps and preconditions in the body; update existing strat files when the workflow evolves.
 
 Front-matter (REQUIRED at the top of every topic file you write):
 ---

@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
 import { evaluateConsolidatorTrigger } from "../src/hooks/consolidator-trigger.js";
-import { OM_OBSERVATIONS_DROPPED } from "../src/ledger/index.js";
+import { OM_OBSERVATIONS_DROPPED, OM_OBSERVATIONS_RECORDED } from "../src/ledger/index.js";
 import { Runtime } from "../src/runtime.js";
 import { observation, observationsRecordedEntry, rawMessage, type TestEntry } from "./fixtures/session.js";
 
@@ -252,6 +252,115 @@ describe("S2 barrier ordering (observer → consolidation → render)", () => {
 		expect(existsSync(join(memoryRoot, "partial.md"))).toBe(false);
 		expect(runtime.lastPromote).not.toBe("promoted");
 		expect(runtime.compactionBarrier).toBe(false); // cleared by the hook's finally
+	});
+
+	it("drains full pre-tail observer chunks inside the barrier before consolidating/snapping", async () => {
+		const memoryRoot = join(cwd, ".memory", "sess-drain");
+		mkdirSync(memoryRoot, { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "settings.json"),
+			JSON.stringify({
+				"observational-memory": {
+					chunkTokens: 20,
+					tailTokens: 20,
+					consolidateAtPoolTokens: 10_000,
+				},
+			}),
+		);
+		// e1 (20 tok), e2 (20 tok), e3 (16 tok) => 56 raw tokens > max(tailTokens=20, chunkTokens=20)
+		const branch: TestEntry[] = [
+			rawMessage("e1", "a".repeat(80), { timestamp: "2026-05-02T10:00:00.000Z" }),
+			rawMessage("e2", "b".repeat(80), { timestamp: "2026-05-02T10:01:00.000Z" }),
+			rawMessage("e3", "c".repeat(64), { timestamp: "2026-05-02T10:02:00.000Z" }),
+		];
+		const runtime = makeRuntime(cwd, memoryRoot);
+		const { handler, appended } = makeHandler(runtime, branch);
+
+		let barrierSpawns = 0;
+		h.spawnWorker.mockImplementation(async (opts: SpawnOpts) => {
+			if (runtime.compactionBarrier) barrierSpawns += 1;
+			const resultPath = opts.env.OM_RESULT_PATH!;
+			mkdirSync(dirname(resultPath), { recursive: true });
+			const idx = h.spawnWorker.mock.calls.length;
+			writeFileSync(
+				resultPath,
+				JSON.stringify({
+					observations: [
+						{ timestamp: `2026-05-02 10:0${idx - 1}`, content: `drained fact ${idx}`, kind: "assertion" },
+					],
+				}),
+			);
+			return { code: 0, signal: null, stderr: "" };
+		});
+
+		const result = (await handler(
+			{ preparation: { firstKeptEntryId: "e3", tokensBefore: 56 } },
+			makeCtx(cwd, branch),
+		)) as { compaction?: { summary?: string; firstKeptEntryId?: string } };
+
+		// 2 pre-tail chunks (e1, e2) drained inside the barrier, leaving e3 (16 tok < 20) in the tail.
+		expect(barrierSpawns).toBe(2);
+		expect(h.spawnWorker).toHaveBeenCalledTimes(2);
+		expect(appended.filter((e) => e.type === OM_OBSERVATIONS_RECORDED)).toHaveLength(2);
+		expect(result.compaction?.firstKeptEntryId).toBe("e3");
+		expect(result.compaction?.summary).toContain("drained fact 1");
+		expect(result.compaction?.summary).toContain("drained fact 2");
+	});
+
+	it("retries a failed pre-tail observer inside the barrier even when remaining tokens are below drainThreshold", async () => {
+		const memoryRoot = join(cwd, ".memory", "sess-drain-retry");
+		mkdirSync(memoryRoot, { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "settings.json"),
+			JSON.stringify({
+				"observational-memory": {
+					chunkTokens: 20,
+					tailTokens: 20,
+					consolidateAtPoolTokens: 10_000,
+				},
+			}),
+		);
+		// e1 (20 tok) + e2 (16 tok) => 36 tok > drainThreshold (20).
+		// After e1 is dispatched (dispatchedCoversUpToId = e1), remainingUnobserved() is 16 < 20.
+		const branch: TestEntry[] = [
+			rawMessage("e1", "a".repeat(80), { timestamp: "2026-05-02T10:00:00.000Z" }),
+			rawMessage("e2", "b".repeat(64), { timestamp: "2026-05-02T10:01:00.000Z" }),
+		];
+		const runtime = makeRuntime(cwd, memoryRoot);
+		const { handler, appended } = makeHandler(runtime, branch);
+
+		let barrierSpawns = 0;
+		h.spawnWorker.mockImplementation(async (opts: SpawnOpts) => {
+			if (runtime.compactionBarrier) barrierSpawns += 1;
+			if (h.spawnWorker.mock.calls.length === 1) {
+				return { code: 1, signal: null, stderr: "transient observer failure" };
+			}
+			const resultPath = opts.env.OM_RESULT_PATH!;
+			mkdirSync(dirname(resultPath), { recursive: true });
+			writeFileSync(
+				resultPath,
+				JSON.stringify({
+					observations: [
+						{ timestamp: "2026-05-02 10:00", content: "retried pre-tail fact", kind: "assertion" },
+					],
+				}),
+			);
+			return { code: 0, signal: null, stderr: "" };
+		});
+
+		const result = (await handler(
+			{ preparation: { firstKeptEntryId: "e2", tokensBefore: 36 } },
+			makeCtx(cwd, branch),
+		)) as { compaction?: { summary?: string; firstKeptEntryId?: string } };
+
+		expect(barrierSpawns).toBe(2);
+		expect(h.spawnWorker).toHaveBeenCalledTimes(2);
+		expect(runtime.failedSlices).toHaveLength(0);
+		expect(appended.filter((e) => e.type === OM_OBSERVATIONS_RECORDED)).toHaveLength(1);
+		expect(result.compaction?.firstKeptEntryId).toBe("e2");
+		expect(result.compaction?.summary).toContain("retried pre-tail fact");
 	});
 });
 

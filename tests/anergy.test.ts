@@ -87,6 +87,18 @@ describe("checkAnergy", () => {
 		const report = checkAnergy([topic("t.md", asserts)], cwd, []);
 		expect(report.get("t.md")).toHaveLength(20);
 	});
+
+	it("resolves asserted files and symbols inside nested sub-repository directories", () => {
+		const subSrc = join(cwd, "Github Repository", "my-app", "src");
+		mkdirSync(subSrc, { recursive: true });
+		writeFileSync(join(subSrc, "server.py"), "def start_server():\n    pass\n");
+
+		const passing = checkAnergy([topic("t.md", ["src/server.py", "src/server.py#start_server"])], cwd, []);
+		expect(passing.size).toBe(0);
+
+		const missing = checkAnergy([topic("t.md", ["src/server.py#missing_fn"])], cwd, []);
+		expect(missing.get("t.md")).toEqual(["src/server.py#missing_fn"]);
+	});
 });
 
 describe("renderMemoryMap with anergy", () => {

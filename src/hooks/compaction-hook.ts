@@ -1,9 +1,10 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { logIfEnabled } from "../debug-log.js";
 import { renderMemoryMap } from "../memory/index-render.js";
-import { checkAnergy } from "../memory/anergy.js";
-import { listStrats, listTopics, parseDeaths, readDeaths, readJourney, readState } from "../memory/paths.js";
-import { resolve } from "node:path";
+import { checkAnergy, type AnergyReport } from "../memory/anergy.js";
+import { listStrats, listTopics, parseDeaths, parseFrontMatter, readDeaths, readJourney, readState } from "../memory/paths.js";
 import type { Runtime } from "../runtime.js";
 import {
 	ackedChunkBoundaryIndices,
@@ -11,6 +12,7 @@ import {
 	buildLineMeta,
 	deriveProvenance,
 	entryIndexById,
+	entryIndexForId,
 	extractOpenLoops,
 	foldLedger,
 	isSourceEntry,
@@ -27,7 +29,7 @@ import {
 import { estimateStringTokens } from "../tokens.js";
 import type { Topic } from "../memory/paths.js";
 import { evaluateConsolidatorTrigger } from "./consolidator-trigger.js";
-import { pumpWorkerQueue } from "./observer-trigger.js";
+import { effectiveWatermarkId, evaluateObserverTriggers, pumpWorkerQueue } from "./observer-trigger.js";
 
 /** First source entry after `boundaryIndex` that is a valid cut point, or undefined. */
 function firstKeptAfterBoundary(branch: Entry[], boundaryIndex: number): Entry | undefined {
@@ -178,13 +180,116 @@ export function lastUserQuery(branch: Entry[]): string | undefined {
 	return undefined;
 }
 
+const TOPIC_EXCERPT_MAX_CHARS = 360;
+
+function extractStateSection(stateBody: string, heading: string): string | undefined {
+	const lines = stateBody.split("\n");
+	let start = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].trimStart().startsWith(heading)) {
+			start = i + 1;
+			break;
+		}
+	}
+	if (start < 0) return undefined;
+	const body: string[] = [];
+	for (let i = start; i < lines.length; i++) {
+		if (lines[i].startsWith("## ")) break;
+		body.push(lines[i]);
+	}
+	const joined = body.join("\n").trim();
+	return joined.length > 0 ? joined : undefined;
+}
+
 /**
- * P2.5 — §2.6 candidate pool: topic summaries + STATE lines, built HERE so the
- * renderer stays pure (all IO at the boundary). `meta.tokenCount` is the
- * code-computed estimate; the other LineMeta fields are informational defaults —
- * §2.6 relevance ignores them and scores purely lexically against the query.
+ * §2.6 compaction query: combines up to the last 3 non-`om.*` user/custom messages with
+ * `## Next` and `## Open loops` from `STATE.md`, bounded to `QUERY_MAX_CHARS`.
  */
-export function buildRelevantCandidates(state: StateDoc | undefined, topics: Topic[]): ScoredLine[] {
+export function buildCompactionQuery(branch: Entry[], state?: StateDoc): string | undefined {
+	const recentMessages: string[] = [];
+	for (let i = branch.length - 1; i >= 0 && recentMessages.length < 3; i--) {
+		const entry = branch[i];
+		if (!entry) continue;
+		if (entry.type === "custom_message") {
+			if (typeof entry.customType === "string" && entry.customType.startsWith("om.")) continue;
+			const text = entryText(entry.content).trim();
+			if (text) recentMessages.push(text);
+			continue;
+		}
+		if (entry.type === "message" && entry.message) {
+			const message = entry.message as { role?: string; content?: unknown };
+			if (message.role !== "user") continue;
+			const text = entryText(message.content).trim();
+			if (text) recentMessages.push(text);
+		}
+	}
+
+	const parts: string[] = [];
+	if (recentMessages.length > 0) parts.push(recentMessages[0]);
+	if (state?.body) {
+		const next = extractStateSection(state.body, "## Next");
+		if (next) parts.push(next);
+		const openLoops = extractOpenLoops(state.body);
+		if (openLoops) parts.push(openLoops);
+	}
+	for (const older of recentMessages.slice(1)) {
+		parts.push(older);
+	}
+
+	const joined = parts.join("\n").trim();
+	return joined ? joined.slice(0, QUERY_MAX_CHARS) : undefined;
+}
+
+function extractTopicExcerpts(body: string): Array<{ heading?: string; excerpt: string }> {
+	const trimmed = body.trim();
+	if (!trimmed) return [];
+
+	const collapse = (text: string): string => {
+		const collapsed = text.replace(/\s+/g, " ").trim();
+		if (!collapsed) return "";
+		return collapsed.length > TOPIC_EXCERPT_MAX_CHARS
+			? `${collapsed.slice(0, TOPIC_EXCERPT_MAX_CHARS - 1)}…`
+			: collapsed;
+	};
+
+	if (/^## /m.test(trimmed)) {
+		const sections: Array<{ heading?: string; excerpt: string }> = [];
+		let currentHeading: string | undefined;
+		let buffer: string[] = [];
+		const flush = (): void => {
+			const excerpt = collapse(buffer.join("\n"));
+			if (excerpt) sections.push({ heading: currentHeading, excerpt });
+			buffer = [];
+		};
+		for (const line of trimmed.split("\n")) {
+			if (line.startsWith("## ")) {
+				flush();
+				currentHeading = line.slice(3).trim() || undefined;
+			} else {
+				buffer.push(line);
+			}
+		}
+		flush();
+		return sections;
+	}
+
+	return trimmed
+		.split(/\n\s*\n/)
+		.map((para) => ({ excerpt: collapse(para) }))
+		.filter((item) => item.excerpt.length > 0);
+}
+
+/**
+ * P2.5 — §2.6 candidate pool: topic summaries + (when `memoryRoot` is supplied) non-anergic
+ * topic body excerpts, falling back to STATE lines when no topic files exist or in legacy
+ * 2-arg calls. Built HERE so the renderer stays pure (all IO at the boundary).
+ */
+export function buildRelevantCandidates(
+	state: StateDoc | undefined,
+	topics: Topic[],
+	memoryRoot?: string,
+	anergy?: AnergyReport,
+): ScoredLine[] {
 	const syntheticMeta = (text: string): LineMeta => ({
 		kind: "event",
 		provenance: "model-distilled",
@@ -193,16 +298,37 @@ export function buildRelevantCandidates(state: StateDoc | undefined, topics: Top
 		tokenCount: estimateStringTokens(text),
 	});
 	const candidates: ScoredLine[] = [];
-	if (state) {
+	const includeStateLines = memoryRoot === undefined || topics.length === 0;
+	if (includeStateLines && state) {
 		state.body.split("\n").forEach((line, index) => {
 			const text = line.trim();
 			if (!text) return;
 			candidates.push({ id: `state:${index}`, text, meta: syntheticMeta(text) });
 		});
 	}
+	const hasMemoryDir = memoryRoot !== undefined && existsSync(memoryRoot);
 	for (const topic of topics) {
-		if (!topic.summary) continue;
-		candidates.push({ id: `topic:${topic.path}`, text: topic.summary, meta: syntheticMeta(topic.summary) });
+		if (memoryRoot !== undefined && (anergy?.get(topic.filename)?.length ?? 0) > 0) continue;
+		if (topic.summary) {
+			candidates.push({ id: `topic:${topic.path}`, text: topic.summary, meta: syntheticMeta(topic.summary) });
+		}
+		if (hasMemoryDir && memoryRoot) {
+			try {
+				const raw = readFileSync(join(memoryRoot, topic.filename), "utf-8");
+				const { body } = parseFrontMatter(raw);
+				const sections = extractTopicExcerpts(body);
+				sections.forEach(({ heading, excerpt }, idx) => {
+					const text = `[${topic.filename}${heading ? `#${heading}` : ""}] ${excerpt}`;
+					candidates.push({
+						id: `topic-body:${topic.path}#${idx}`,
+						text,
+						meta: syntheticMeta(text),
+					});
+				});
+			} catch {
+				// Topic file vanished or unreadable: skip body excerpts gracefully.
+			}
+		}
 	}
 	return candidates;
 }
@@ -253,6 +379,20 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 					);
 				}
 				await runtime.whenWorkersIdle();
+				branch = (ctx.sessionManager?.getBranch?.() as Entry[] | undefined) ?? (event.branchEntries as Entry[]);
+				snap = snapCutoff(branch, firstKeptEntryId, tailTokens);
+			}
+
+			// Drain full unobserved chunks before the tailTokens region prior to consolidation/snap.
+			const remainingUnobserved = (): number => {
+				const wmId = effectiveWatermarkId(runtime, branch);
+				return rawTokensAfterIndex(branch, entryIndexForId(branch, wmId));
+			};
+			const drainThreshold = Math.max(tailTokens, runtime.config.chunkTokens);
+			while (!runtime.pipelinePaused && (runtime.failedSlices.length > 0 || remainingUnobserved() >= drainThreshold)) {
+				evaluateObserverTriggers(pi, runtime, ctx, { allowDuringBarrier: true, stopAtTailTokens: tailTokens });
+				if (runtime.observersInFlight.size === 0) break;
+				await runtime.whenObserversIdle();
 				branch = (ctx.sessionManager?.getBranch?.() as Entry[] | undefined) ?? (event.branchEntries as Entry[]);
 				snap = snapCutoff(branch, firstKeptEntryId, tailTokens);
 			}
@@ -339,8 +479,8 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			// P2.5: §2.6 relevance — query + candidates captured here (render stays pure).
 			const folded = foldLedger(branch);
 			const observationMeta = buildPackMeta(branch, folded);
-			const query = lastUserQuery(branch);
-			const candidates = buildRelevantCandidates(state, topics);
+			const query = buildCompactionQuery(branch, state);
+			const candidates = buildRelevantCandidates(state, topics, runtime.memoryRoot || undefined, anergy);
 			const { summary, packExplain } = renderSummaryV2({
 				state,
 				journey,
@@ -354,6 +494,8 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 				// line the markers are unreachable from the production render path.
 				gaps: folded.gaps,
 				observationMeta,
+				budget: runtime.config.renderBudgetTokens,
+				topK: runtime.config.relevantTopK,
 				strats: listStrats(runtime.memoryRoot),
 				openLoops: state ? extractOpenLoops(state.body) : undefined,
 			});

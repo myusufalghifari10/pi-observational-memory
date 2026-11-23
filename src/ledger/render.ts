@@ -8,6 +8,9 @@ export const RENDER_BUDGET_TOKENS = 18_000;
 /** §2.6 top-k for section [5] — at most this many RELEVANT MEMORY lines render. */
 export const RELEVANT_TOP_K = 5;
 
+/** Max members kept in a single supersession belief unit; older members degrade to singletons. */
+export const MAX_BELIEF_CHAIN = 4;
+
 const CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in this session.
 
 - Journey: a short, purely descriptive history of how this work reached its current state — for orientation only. It is not an instruction or a plan; do not read intent or next steps into it.
@@ -142,6 +145,8 @@ export type RenderSummaryV2Input = {
 	observationMeta?: Map<string, LineMeta>;
 	/** [5]+[6] shared token budget (default RENDER_BUDGET_TOKENS; reserved sections exempt). */
 	budget?: number;
+	/** [5] max rendered RELEVANT MEMORY lines (default RELEVANT_TOP_K). */
+	topK?: number;
 	/** [7] Strat entries; empty ⇒ section omitted. */
 	strats?: StratLine[];
 	/** [8] STATE's Open-loops body, already extracted (see `extractOpenLoops`). */
@@ -304,6 +309,18 @@ function buildBeliefUnits(sorted: Observation[], supersessions?: Map<string, str
 		groups.set(terminal, group);
 	}
 
+	// Cap chain length per belief unit at MAX_BELIEF_CHAIN so long chains degrade older
+	// members to singletons instead of forming giant un-packable units.
+	for (const [terminal, group] of groups) {
+		if (group.length <= MAX_BELIEF_CHAIN) continue;
+		const nonTerminal = group.filter((memberTs) => memberTs !== terminal);
+		const keptSet = new Set([...nonTerminal.slice(-(MAX_BELIEF_CHAIN - 1)), terminal]);
+		for (const memberTs of group) {
+			if (!keptSet.has(memberTs)) terminalOf.delete(memberTs);
+		}
+		groups.set(terminal, group.filter((memberTs) => keptSet.has(memberTs)));
+	}
+
 	const byTimestamp = new Map(sorted.map((o) => [o.timestamp, o]));
 	const units: BeliefUnit[] = [];
 	const emitted = new Set<string>();
@@ -395,6 +412,7 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 	// byte-identical to the P1 output — an upgrade can never regress old data.
 	const fallback = sorted.some((observation) => !metaByTimestamp?.has(observation.timestamp));
 	const budget = input.budget ?? RENDER_BUDGET_TOKENS;
+	const maxRelevantLines = input.topK ?? RELEVANT_TOP_K;
 
 	// §2.6 two-phase section [5] (Fix A exclude-then-cap): TOPIC/STATE candidates are [5]-only
 	// and reserve budget FIRST — preserving P2b's "[5] counts first" priority (test (d)).
@@ -405,7 +423,7 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 			? identifierTokens(input.query)
 			: undefined;
 	const topicEntries = queryTokens ? scoreTopicEntries(queryTokens, input.candidates ?? []) : [];
-	const reservedTopics = admitRelevant(topicEntries, budget, RELEVANT_TOP_K);
+	const reservedTopics = admitRelevant(topicEntries, budget, maxRelevantLines);
 	const topicTokens = reservedTopics.reduce((sum, entry) => sum + entry.tokens, 0);
 
 	let observationLines: string[];
@@ -446,7 +464,10 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 		});
 		// [6] packs against the budget the reserved topics left.
 		const { ranked, admitted } = packRanked(rankedUnits, budget - topicTokens);
-		observationLines = ranked.flatMap((entry, index) => (admitted[index] ? unitLines(entry.unit) : []));
+		const admittedEntries = ranked
+			.filter((_, index) => admitted[index])
+			.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+		observationLines = admittedEntries.flatMap((entry) => unitLines(entry.unit));
 		packExplain = {
 			fallback: false,
 			lines: ranked.flatMap((entry, index) =>
@@ -480,7 +501,7 @@ export function renderSummaryV2(input: RenderSummaryV2Input): { summary: string;
 	const visibleRelevant = admitRelevant(
 		[...reservedTopics, ...teaserEntries],
 		Number.POSITIVE_INFINITY, // no token charge in this pass — the binding cap is the line cap
-		RELEVANT_TOP_K,
+		maxRelevantLines,
 	);
 
 	const parts: string[] = [input.instructions ?? CONTEXT_USAGE_INSTRUCTIONS];

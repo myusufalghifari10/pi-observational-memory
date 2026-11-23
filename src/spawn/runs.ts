@@ -17,6 +17,8 @@ export type RawObservation = {
 	content: string;
 	/** P1.2 semantic kind as declared by the model; re-validated (default "event") at commit. */
 	kind?: string;
+	/** Optional source entry id emitted by the observer from `[Source entry id: <id>]`. */
+	sourceEntryId?: string;
 };
 
 export type ObserverRunResult = {
@@ -76,6 +78,9 @@ function isRawObservation(value: unknown): value is RawObservation {
 	// A non-string kind is dropped (not fatal): the commit path re-validates and defaults.
 	if (v.kind !== undefined && typeof v.kind !== "string") {
 		(v as { kind?: unknown }).kind = undefined;
+	}
+	if (v.sourceEntryId !== undefined && typeof v.sourceEntryId !== "string") {
+		(v as { sourceEntryId?: unknown }).sourceEntryId = undefined;
 	}
 	return true;
 }

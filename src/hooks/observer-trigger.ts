@@ -5,7 +5,7 @@ import {
 	entryIndexById,
 	entryIndexForId,
 	foldLedger,
-	latestCoverageMarkerId,
+	latestAckedCoverageMarkerId,
 	nowTimestamp,
 	poolTokens,
 	rawTokensAfterIndex,
@@ -21,8 +21,10 @@ import {
 	type Entry,
 	type Observation,
 	type SourceSlice,
+	type StateDoc,
 } from "../ledger/index.js";
 import { detectSupersessions, excludeAlreadySuperseded } from "../ledger/supersede.js";
+import { readState } from "../memory/paths.js";
 import type { Runtime } from "../runtime.js";
 import { buildWorkerArgv, buildWorkerEnv, spawnWorker } from "../spawn/launch.js";
 import { readObserverResult, readWorkerCost, runCostPath, runResultPath } from "../spawn/runs.js";
@@ -145,9 +147,9 @@ function laterMarkerId(branch: Entry[], a: string | undefined, b: string | undef
 	return ia >= ib ? a : b;
 }
 
-/** Effective watermark = later of committed ledger coverage and the in-memory dispatch marker. */
+/** Effective watermark = later of committed ledger coverage (recorded or gap) and the in-memory dispatch marker. */
 export function effectiveWatermarkId(runtime: Runtime, branch: Entry[]): string | undefined {
-	const committed = latestCoverageMarkerId(branch, OM_OBSERVATIONS_RECORDED);
+	const committed = latestAckedCoverageMarkerId(branch);
 	const dispatchedResolved = entryIndexForId(branch, runtime.dispatchedCoversUpToId) >= 0 ? runtime.dispatchedCoversUpToId : undefined;
 	return laterMarkerId(branch, committed, dispatchedResolved);
 }
@@ -290,17 +292,15 @@ export function evaluateObserverTriggers(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: TriggerCtx,
-	opts: { force?: boolean } = {},
+	opts: { force?: boolean; allowDuringBarrier?: boolean; stopAtTailTokens?: number } = {},
 ): void {
 	if (!runtime.enabled || runtime.config.passive) return;
 	// P0.4: circuit breaker — a paused pipeline never dispatches (no retries, no new chunks).
 	if (runtime.pipelinePaused) return;
 
 	// S2 anti-starvation: no NEW observer may start while a compaction barrier is running
-	// (wait observers → run the consolidator → render). Every observer completion pumps the queue,
-	// so without this guard a busy session would keep feeding fresh chunks and the barrier could
-	// never observe a settled worker state.
-	if (runtime.compactionBarrier) return;
+	// unless the barrier itself is draining pre-tail chunks (allowDuringBarrier).
+	if (runtime.compactionBarrier && !opts.allowDuringBarrier) return;
 
 	const hasUI = ctx.hasUI;
 	const ui = ctx.ui;
@@ -309,7 +309,7 @@ export function evaluateObserverTriggers(
 	// Serial mode, consolidator priority: when the pool is due for consolidation, observers
 	// yield the single slot so the consolidator handler (registered next in the same event)
 	// can take it and drain the buffer first.
-	if (runtime.config.serialWorkers && !runtime.consolidatorInFlight) {
+	if (!opts.allowDuringBarrier && runtime.config.serialWorkers && !runtime.consolidatorInFlight) {
 		const pool = poolTokens(foldLedger(sessionManager.getBranch()).activeObservations);
 		if (shouldYieldToConsolidator(pool, runtime.config.consolidateAtPoolTokens)) return;
 	}
@@ -352,6 +352,7 @@ export function evaluateObserverTriggers(
 		// Use break (not return) so execution always reaches the post-loop notify.
 		// A return here would exit the function before the batched start-toast fires.
 		// `/om:observer` forces past this clock; the empty-slice guard below still stops it.
+		if (opts.stopAtTailTokens !== undefined && remaining <= opts.stopAtTailTokens) break;
 		if (!opts.force && remaining < runtime.config.chunkTokens) break;
 
 		const slice = selectSourceSlice(branch, watermarkId, runtime.config.chunkTokens);
@@ -371,16 +372,45 @@ export function evaluateObserverTriggers(
 /** Max observations from the existing buffer shown to the next observer as reference context. */
 export const BRIDGE_TAIL = 8;
 
+/** Extract a `## <heading>` section body from STATE.md text, up to the next `## ` heading. */
+function extractStateSection(stateBody: string, heading: string): string | undefined {
+	const lines = stateBody.split("\n");
+	let start = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].trimStart().startsWith(heading)) {
+			start = i + 1;
+			break;
+		}
+	}
+	if (start < 0) return undefined;
+	const body: string[] = [];
+	for (let i = start; i < lines.length; i++) {
+		if (lines[i].startsWith("## ")) break;
+		body.push(lines[i]);
+	}
+	const joined = body.join("\n").trim();
+	return joined.length > 0 ? joined : undefined;
+}
+
 /**
- * Fence the last few buffer observations as read-only reference context for the next
- * observer: chunks routinely open with pronouns and shorthand whose referents live in the
- * previous chunk. Omitted entirely when the buffer is empty (first chunk / fresh session).
+ * Fence the last few buffer observations (plus compact Goal/Constraints from STATE.md when
+ * available) as read-only reference context for the next observer: chunks routinely open with
+ * pronouns and shorthand whose referents live in the previous chunk. Omitted entirely when both
+ * the buffer and STATE orientation are empty.
  */
-export function bridgeContextBlock(activeObservations: Observation[]): string | undefined {
-	if (activeObservations.length === 0) return undefined;
+export function bridgeContextBlock(activeObservations: Observation[], state?: StateDoc): string | undefined {
+	const stateParts: string[] = [];
+	if (state?.body) {
+		const goal = extractStateSection(state.body, "## Goal");
+		if (goal) stateParts.push(`## Goal\n${goal}`);
+		const constraints = extractStateSection(state.body, "## Constraints");
+		if (constraints) stateParts.push(`## Constraints\n${constraints}`);
+	}
+	if (activeObservations.length === 0 && stateParts.length === 0) return undefined;
 	const recent = sortObservations(activeObservations).slice(-BRIDGE_TAIL);
 	return [
 		"===== PREVIOUS CONTEXT (already recorded from earlier chunks — reference only) =====",
+		...stateParts,
 		...recent.map((observation) => observationToLine(observation)),
 		"===== END PREVIOUS CONTEXT =====",
 		"",
@@ -442,7 +472,8 @@ async function dispatchObserver(
 		// is delivered verbatim, but it is fenced as inert DATA, and the operative instruction is
 		// repeated AFTER the fence so recency keeps the model in observer-mode rather than
 		// continuing the transcript it just read (see the role-confusion failures in testing).
-		const bridge = bridgeContextBlock(foldLedger(ctx.sessionManager.getBranch()).activeObservations);
+		const state = runtime.memoryRoot ? readState(runtime.memoryRoot) : undefined;
+		const bridge = bridgeContextBlock(foldLedger(ctx.sessionManager.getBranch()).activeObservations, state);
 		const userText = buildObserverPrompt(chunkText, bridge);
 
 		const argv = buildWorkerArgv({

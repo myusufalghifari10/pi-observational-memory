@@ -10,6 +10,8 @@ import {
 	ensureGenerationalRoot,
 	generationMarkerPath,
 	latestGenerationDir,
+	listStrats,
+	listTopics,
 	promoteStaging,
 } from "../src/memory/paths.js";
 import { Runtime } from "../src/runtime.js";
@@ -58,6 +60,21 @@ describe("staged consolidation generations (S3)", () => {
 		expect(existsSync(join(roots.work, "topic.md"))).toBe(true);
 		expect(existsSync(join(roots.work, "strats", "deploy.md"))).toBe(true);
 		expect(existsSync(join(roots.work, ".runs"))).toBe(false); // IPC stays live-only
+	});
+
+	it("listTopics and listStrats on a .g<N> staging root strip the generation suffix from emitted paths", () => {
+		const base = join(scratch(), ".memory");
+		const live = liveRootWithContent(base);
+		const roots = beginStaging(live);
+
+		const topics = listTopics(roots.work);
+		const strats = listStrats(roots.work);
+		expect(topics).toHaveLength(1);
+		expect(topics[0]?.path).toBe(join(".memory", "session-1", "topic.md"));
+		expect(topics[0]?.path).not.toMatch(/\.g\d+/);
+		expect(strats).toHaveLength(1);
+		expect(strats[0]?.path).toBe(join(".memory", "session-1", "strats", "deploy.md"));
+		expect(strats[0]?.path).not.toMatch(/\.g\d+/);
 	});
 
 	it("a write into the work generation never touches the live memory (crash isolation)", () => {

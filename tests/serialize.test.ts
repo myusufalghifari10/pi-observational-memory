@@ -9,8 +9,10 @@ import { describe, expect, it } from "vitest";
 
 import {
 	MAX_RECORD_CONTENT_CHARS,
+	MAX_TOOL_CALL_ARGS_CHARS,
 	serializeConversation,
 	truncateRecordContent,
+	truncateToolCallArgs,
 } from "../src/ledger/serialize.js";
 import type { Message } from "@earendil-works/pi-ai";
 
@@ -63,5 +65,44 @@ describe("P0.6 tool-result truncation", () => {
 		const content = "z".repeat(45_000);
 		const result = truncateRecordContent(content);
 		expect(result).toContain("… [truncated 5000 chars]");
+	});
+
+	it("omits assistant thinking blocks from serialized conversation by default", () => {
+		const assistantWithThinking = {
+			role: "assistant",
+			timestamp: "2026-09-25T10:00:00.000Z",
+			content: [
+				{ type: "thinking", thinking: "secret chain of thought" },
+				{ type: "text", text: "Visible assistant reply" },
+			],
+		} as unknown as Message;
+		const thinkingOnly = {
+			role: "assistant",
+			timestamp: "2026-09-25T10:01:00.000Z",
+			content: [{ type: "thinking", thinking: "only thinking" }],
+		} as unknown as Message;
+
+		const out = serializeConversation([assistantWithThinking, thinkingOnly]);
+		expect(out).toContain("Visible assistant reply");
+		expect(out).not.toContain("secret chain of thought");
+		expect(out).not.toContain("only thinking");
+		expect(out).not.toContain("[thinking:");
+		expect(out).not.toContain("[non-text content omitted]");
+	});
+
+	it("truncates toolCall JSON arguments over MAX_TOOL_CALL_ARGS_CHARS (4000)", () => {
+		expect(MAX_TOOL_CALL_ARGS_CHARS).toBe(4_000);
+		const hugeArg = "w".repeat(MAX_TOOL_CALL_ARGS_CHARS + 500);
+		const assistantToolCall = {
+			role: "assistant",
+			timestamp: "2026-09-25T10:00:00.000Z",
+			content: [{ type: "toolCall", name: "write", arguments: { content: hugeArg } }],
+		} as unknown as Message;
+
+		const out = serializeConversation([assistantToolCall]);
+		expect(out).toContain("[write(");
+		expect(out).toContain("… [truncated");
+		expect(out.length).toBeLessThan(MAX_TOOL_CALL_ARGS_CHARS + 200);
+		expect(truncateToolCallArgs("short")).toBe("short");
 	});
 });

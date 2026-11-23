@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { detectSupersessions, excludeAlreadySuperseded, identifierTokens } from "../src/ledger/supersede.js";
+import {
+	detectSupersessions,
+	excludeAlreadySuperseded,
+	hasSupersessionSignal,
+	identifierTokens,
+	SUPERSESSION_CUE_RE,
+} from "../src/ledger/supersede.js";
 import { foldLedger } from "../src/ledger/fold.js";
 import {
 	observation,
@@ -147,5 +153,60 @@ describe("P1.3 supersession detector", () => {
 		const a = obs("2026-05-02T11:00:00", "Project uses MySQL database for storage", "assertion");
 		const b = obs("2026-05-02T12:00:00", "User prefers TanStack Query over SWR state", "decision");
 		expect(detectSupersessions([a, b], older)).toEqual(detectSupersessions([b, a], older));
+	});
+
+	it("rejects long domain observations sharing only 2 of 12+ tokens without a correction cue", () => {
+		const older = [
+			obs(
+				"2026-05-02T10:00:00",
+				"Worker pipeline processes memory chunks using redis queue metrics telemetry batching daemon",
+				"assertion",
+			),
+		];
+		const incoming = [
+			obs(
+				"2026-05-02T11:00:00",
+				"Authentication service validates memory chunks via oauth bearer tokens certificates rotation",
+				"assertion",
+			),
+		];
+		expect(detectSupersessions(incoming, older)).toEqual([]);
+	});
+
+	it("accepts long observations with >= 2 shared tokens when an explicit correction cue is present", () => {
+		const older = [
+			obs(
+				"2026-05-02T10:00:00",
+				"Worker pipeline processes memory chunks using redis queue metrics telemetry batching daemon",
+				"assertion",
+			),
+		];
+		const withSwitchedFrom = [
+			obs(
+				"2026-05-02T11:00:00",
+				"Worker pipeline switched from redis queue to postgres advisory locks for durable scheduling",
+				"decision",
+			),
+		];
+		const withInsteadOf = [
+			obs(
+				"2026-05-02T11:01:00",
+				"Memory chunks now dispatch via in-process promises instead of external broker polling",
+				"assertion",
+			),
+		];
+		const withNoLonger = [
+			obs(
+				"2026-05-02T11:02:00",
+				"Worker pipeline no longer uses external daemon metrics telemetry batching",
+				"decision",
+			),
+		];
+		expect(detectSupersessions(withSwitchedFrom, older)).toHaveLength(1);
+		expect(detectSupersessions(withInsteadOf, older)).toHaveLength(1);
+		expect(detectSupersessions(withNoLonger, older)).toHaveLength(1);
+		expect(SUPERSESSION_CUE_RE.test("instead of")).toBe(true);
+		expect(hasSupersessionSignal("plain statement", new Set(["a", "b", "c", "d", "e"]), new Set(["a", "b", "f", "g", "h"]), 2)).toBe(false);
+		expect(hasSupersessionSignal("switched from x", new Set(["a", "b", "c", "d", "e"]), new Set(["a", "b", "f", "g", "h"]), 2)).toBe(true);
 	});
 });
